@@ -1,0 +1,35 @@
+{
+  "name": "clipscribe-desktop",
+  "version": "0.1.0",
+  "description": "Desktop meeting recorder with rolling transcription and foldered session management.",
+  "main": "src/main/main.js",
+  "bin": {
+    "clipscribe": "src/cli/clipscribe.js"
+  },
+  "scripts": {
+    "start": "electron . --no-sandbox --disable-gpu --disable-gpu-sandbox --disable-breakpad",
+    "dev": "electron . --no-sandbox --disable-gpu --disable-gpu-sandbox --disable-breakpad",
+    "lint": "echo \"No linter configured yet\"",
+    "clipscribe": "node src/cli/clipscribe.js",
+    "doctor": "node src/cli/clipscribe.js doctor",
+    "tui": "node src/cli/clipscribe.js tui",
+    "ffmpeg:detect": "node src/cli/clipscribe.js ffmpeg-detect",
+    "ffmpeg:install": "node src/cli/clipscribe.js ffmpeg-install --yes",
+    "rebuild:native": "node src/cli/clipscribe.js repair-native"
+  },
+  "keywords": [
+    "electron",
+    "ffmpeg",
+    "deepgram",
+    "transcription",
+    "recorder"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "application-loopback": "^1.2.7",
+    "audify": "^1.10.1",
+    "better-sqlite3": "^11.7.0",
+    "electron": "^34.0.1"
+  }
+}
