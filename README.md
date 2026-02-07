@@ -1,32 +1,44 @@
+<div align="center">
+
 # ClipScribe Desktop
 
-Standalone desktop app for meeting capture on Windows: select audio sources, record continuously, auto-transcribe in chunks, and keep everything organized by folders/sessions.
+Professional meeting capture for Windows with rolling Deepgram transcription, precise source control, and clean session organization.
 
-## Why ClipScribe
+![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
+![Electron](https://img.shields.io/badge/desktop-Electron-47848F)
+![Node](https://img.shields.io/badge/node-20%2B-339933)
+![FFmpeg](https://img.shields.io/badge/audio-FFmpeg-4CAF50)
+![Deepgram](https://img.shields.io/badge/STT-Deepgram-0EA5E9)
+![License](https://img.shields.io/badge/license-MIT-black)
 
-- Fast capture workflow for meetings/calls.
-- Rolling transcription into a single session document.
-- Per-chunk timestamps and copy actions.
-- Folder-based session organization.
-- Native Windows source options: system output loopback, app loopback, microphones.
+</div>
 
-## Core Behavior
+ClipScribe is built for fast, reliable meeting workflows: capture audio, transcribe on a chunk cadence, and keep everything in one continuous, timestamped session timeline.
 
-1. `Start` creates a new session.
-2. During recording, chunks are transcribed and appended to the same transcript timeline.
-3. `Pause` and `Resume` stay in the same session.
-4. `Stop` finalizes that session.
-5. A new `Start` always creates a new session.
+> [!WARNING]
+> Your Deepgram API key is sensitive. Runtime data lives in `app-data/` and is intentionally gitignored. Never commit or share real keys.
 
-## Tech Stack
+## Contents
 
-- Electron desktop shell
-- SQLite (`better-sqlite3`) for metadata
-- FFmpeg/FFprobe for capture/chunk processing
-- Deepgram STT (`nova-3` default)
-- Windows capture helpers: `audify`, `application-loopback`
+- [Highlights](#highlights)
+- [Quick start](#quick-start)
+- [How recording behaves](#how-recording-behaves)
+- [CLI commands](#cli-commands)
+- [Roadmap](#roadmap)
+- [Troubleshooting](#troubleshooting)
+- [Project layout](#project-layout)
 
-## Quick Start
+## Highlights
+
+- Standalone desktop app experience with no browser dependency
+- Rolling transcription appended to a single active session until stop
+- Timestamped transcript chunks with direct copy actions
+- Folder-based session history for fast retrieval and reuse
+- Source selection for system output loopback (WASAPI), app loopback, system inputs, and microphones
+- Built-in setup tooling: doctor checks, FFmpeg detect/install helpers, and native module repair
+- Optional Deepgram usage breakdown view in settings
+
+## Quick start
 
 ### 1) Install dependencies
 
@@ -40,14 +52,14 @@ npm install
 npm run doctor
 ```
 
-### 3) Install or detect FFmpeg
+### 3) Ensure FFmpeg/FFprobe are configured
 
 ```bash
 npm run ffmpeg:install
 npm run ffmpeg:detect
 ```
 
-### 4) Open guided setup TUI
+### 4) Run setup TUI (optional, recommended)
 
 ```bash
 npm run tui
@@ -59,46 +71,72 @@ npm run tui
 npm start
 ```
 
-## CLI Usage
+> [!TIP]
+> For global CLI usage without `npm run`, run `npm link` once in this repo, then use `clipscribe doctor` and `clipscribe tui` directly.
 
-Use npm scripts:
+## How recording behaves
+
+1. `Start` creates a new session.
+2. Audio is captured continuously while active.
+3. Every chunk interval, transcript is appended to that same session timeline.
+4. `Pause` and `Resume` keep the same session.
+5. `Stop` finalizes the session.
+6. Next `Start` creates a brand-new session.
+
+## CLI commands
+
+Using npm scripts:
 
 ```bash
 npm run clipscribe -- doctor
 npm run clipscribe -- ffmpeg-detect
+npm run clipscribe -- ffmpeg-install --yes
 npm run clipscribe -- repair-native
 npm run clipscribe -- tui
 ```
 
-Use scripts directly:
+Using local script wrappers:
 
 ```powershell
 .\scripts\clipscribe.ps1 doctor
 ```
 
-### Want `clipscribe ...` without `./`?
-
-Install linked CLI once from this repo:
-
-```bash
-npm link
+```bat
+scripts\clipscribe.cmd doctor
 ```
 
-Then run:
+## Roadmap
+
+- Multi-audio capture and mixing: select multiple sources in one session and blend into a single mastered recording stream.
+- macOS support: native capture path and source picker for Apple hardware/audio stacks.
+- Deeper transcript controls: richer editing and export flows for long-form meeting notes.
+
+## Troubleshooting
+
+### `better_sqlite3.node` ABI/version mismatch
 
 ```bash
-clipscribe doctor
-clipscribe tui
+npm run rebuild:native
 ```
 
-## Data, Privacy, and Security
+### FFmpeg source detection/capture issues
 
-- Local runtime state is stored in `app-data/` (sessions, chunks, sqlite, logs, settings).
-- `app-data/` is git-ignored to prevent accidental secret/audio commits.
-- Deepgram API key is currently stored in local settings JSON for MVP behavior.
-- Never commit real API keys; rotate immediately if exposed.
+```bash
+npm run ffmpeg:detect
+npm run doctor
+```
 
-## Project Layout
+In-app path: `Settings -> Setup Health -> Auto-Detect FFmpeg Paths`.
+
+### App launches but behaves unexpectedly
+
+Check startup/runtime log:
+
+```powershell
+Get-Content .\app-data\startup.log -Tail 200
+```
+
+## Project layout
 
 ```text
 .
@@ -109,49 +147,11 @@ clipscribe tui
 |   |-- cli/
 |   |-- main/
 |   `-- renderer/
-|-- .gitignore
 |-- .gitattributes
+|-- .gitignore
 |-- README.md
+|-- package-lock.json
 `-- package.json
 ```
 
-## Troubleshooting
-
-### Native module ABI mismatch (`better-sqlite3.node`)
-
-```bash
-npm run rebuild:native
-```
-
-### FFmpeg source issues
-
-- Run `npm run ffmpeg:detect`.
-- In app, use Setup Health -> Auto-Detect FFmpeg Paths.
-- Confirm your FFmpeg build supports the source type you selected.
-
-### App does not open but logs show startup completed
-
-Check runtime logs:
-
-```powershell
-Get-Content .\app-data\startup.log -Tail 200
-```
-
-## Docs
-
-- Internal docs are stored under `docs/internal/` and excluded from Git by default.
-
-## Git-Ready Checklist
-
-1. Confirm `.gitignore` is present and includes `app-data/`.
-2. Ensure no real keys are in tracked files.
-3. Initialize repo:
-
-```bash
-git init
-git add .
-git status
-```
-
-4. Verify no runtime audio/db/log files are staged.
-
+Internal docs are in `docs/internal/` and excluded from Git by default.
