@@ -485,6 +485,10 @@ function registerIpc() {
     return renamed;
   });
 
+  safeHandle("sessions:set-speaker-alias", async (_, { sessionId, speakerId, alias }) => {
+    return services.recordingService.setSpeakerAlias(sessionId, speakerId, alias);
+  });
+
   safeHandle("sessions:delete", async (_, sessionId) => {
     services.recordingService.deleteSession(sessionId);
     sendUpdate("app:global-updated", { at: new Date().toISOString() });

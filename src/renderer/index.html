@@ -178,8 +178,36 @@
                 <button id="stop-btn" class="danger">Stop</button>
               </div>
               <div id="detail-estimate" class="detail-estimate"></div>
-              <div id="detail-events" class="events-list"></div>
-              <div id="detail-chunks" class="chunks-list"></div>
+              <div id="detail-speakers" class="speaker-alias-panel hidden"></div>
+              <nav class="detail-subtabs" role="tablist" aria-label="Transcript Detail Views">
+                <button
+                  id="detail-tab-transcript"
+                  class="detail-subtab active"
+                  role="tab"
+                  aria-selected="true"
+                  aria-controls="detail-transcript-pane"
+                  type="button"
+                >
+                  Transcript
+                </button>
+                <button
+                  id="detail-tab-timeline"
+                  class="detail-subtab"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="detail-events-pane"
+                  type="button"
+                >
+                  <span class="detail-subtab-label">Timeline</span>
+                  <span id="detail-tab-timeline-count" class="detail-tab-count hidden">0</span>
+                </button>
+              </nav>
+              <section id="detail-transcript-pane" class="detail-pane">
+                <div id="detail-chunks" class="chunks-list"></div>
+              </section>
+              <section id="detail-events-pane" class="detail-pane hidden">
+                <div id="detail-events" class="events-list timeline-list"></div>
+              </section>
             </section>
           </section>
         </section>

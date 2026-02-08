@@ -31,8 +31,36 @@ function countWords(text) {
   return cleaned.split(/\s+/).filter(Boolean).length;
 }
 
+function normalizeUtterances(utterances) {
+  const rows = (utterances || [])
+    .map((item) => ({
+      start: toNumber(item?.start),
+      end: toNumber(item?.end),
+      speaker: Number.isFinite(Number(item?.speaker)) ? Number(item.speaker) : null,
+      transcript: String(item?.transcript || "").trim()
+    }))
+    .filter((item) => item.transcript)
+    .sort((a, b) => a.start - b.start);
+
+  const merged = [];
+  for (const item of rows) {
+    const last = merged[merged.length - 1];
+    const sameSpeaker = last && last.speaker === item.speaker;
+    const shortGap = last && item.start - last.end <= 0.8;
+    if (sameSpeaker && shortGap) {
+      last.end = Math.max(last.end, item.end);
+      last.transcript = `${last.transcript} ${item.transcript}`.replace(/\s+/g, " ").trim();
+      continue;
+    }
+    merged.push({ ...item });
+  }
+  return merged;
+}
+
 function formatTranscriptResult(result, chunkStartSec) {
-  const utterances = Array.isArray(result?.utterances) ? result.utterances : [];
+  const utterances = normalizeUtterances(
+    Array.isArray(result?.utterances) ? result.utterances : []
+  );
   const utteranceLines = utterances
     .map((item) => {
       const text = String(item?.transcript || "").trim();
@@ -52,10 +80,20 @@ function formatTranscriptResult(result, chunkStartSec) {
 
   const paragraphs = Array.isArray(result?.paragraphs) ? result.paragraphs : [];
   const paragraphLines = paragraphs
-    .map((item) => String(item?.transcript || "").trim())
+    .map((item) => {
+      const text = String(item?.transcript || "").trim();
+      if (!text) {
+        return "";
+      }
+      const start = chunkStartSec + toNumber(item?.start);
+      const end = chunkStartSec + toNumber(item?.end);
+      const speakerPrefix =
+        Number.isFinite(Number(item?.speaker)) ? `Speaker ${Number(item.speaker)}: ` : "";
+      return `[${formatClock(start)} - ${formatClock(end)}] ${speakerPrefix}${text}`;
+    })
     .filter(Boolean);
   if (paragraphLines.length > 0) {
-    return paragraphLines.join("\n\n");
+    return paragraphLines.join("\n");
   }
 
   return String(result?.transcript || "").trim();

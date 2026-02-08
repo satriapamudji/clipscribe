@@ -506,6 +506,33 @@ function createRecordingService({
     emitGlobal();
   }
 
+  function setSpeakerAlias(sessionId, speakerId, alias) {
+    const session = repo.getSession(sessionId);
+    if (!session) {
+      throw new Error("Session not found.");
+    }
+    const parsedSpeakerId = Number.parseInt(String(speakerId), 10);
+    if (!Number.isInteger(parsedSpeakerId) || parsedSpeakerId < 0) {
+      throw new Error("speakerId must be a non-negative integer.");
+    }
+    const rt = runtime.get(sessionId);
+    const atSec = rt
+      ? getRuntimeRecordedSeconds(session, rt)
+      : Number(session.recorded_seconds || 0);
+    const normalizedAlias = String(alias || "").trim();
+    repo.addEvent(sessionId, "speaker_alias", atSec, {
+      speaker_id: parsedSpeakerId,
+      alias: normalizedAlias || null
+    });
+    emitSession(sessionId);
+    return {
+      ok: true,
+      sessionId,
+      speakerId: parsedSpeakerId,
+      alias: normalizedAlias || null
+    };
+  }
+
   function getSessionDetail(sessionId) {
     const session = repo.getSession(sessionId);
     if (!session) {
@@ -621,6 +648,7 @@ function createRecordingService({
     pauseSession,
     resumeSession,
     stopSession,
+    setSpeakerAlias,
     changeSessionSources,
     getSessionDetail,
     listFoldersWithSessions,

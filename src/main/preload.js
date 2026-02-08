@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld("clipscribe", {
   getSession: (sessionId) => invoke("sessions:get", sessionId),
   moveSession: (sessionId, folderId) => invoke("sessions:move", { sessionId, folderId }),
   renameSession: (sessionId, title) => invoke("sessions:rename", { sessionId, title }),
+  setSessionSpeakerAlias: (sessionId, speakerId, alias) =>
+    invoke("sessions:set-speaker-alias", { sessionId, speakerId, alias }),
   deleteSession: (sessionId) => invoke("sessions:delete", sessionId),
   changeSessionSources: (sessionId, selectedSources) =>
     invoke("sessions:change-sources", { sessionId, selectedSources }),

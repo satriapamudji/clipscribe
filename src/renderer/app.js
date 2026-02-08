@@ -9,6 +9,7 @@ const state = {
   selectedSessionId: null,
   activeView: "capture",
   captureSubView: "setup",
+  detailSubView: "transcript",
   settingsSubView: "health",
   sourcePickerOpen: false,
   sourceFilter: "all",
@@ -31,6 +32,7 @@ const els = {
   detailEvents: document.getElementById("detail-events"),
   detailMeta: document.getElementById("detail-meta"),
   detailEstimate: document.getElementById("detail-estimate"),
+  detailSpeakers: document.getElementById("detail-speakers"),
   workspaceTitle: document.getElementById("workspace-title"),
   workspaceSubtitle: document.getElementById("workspace-subtitle"),
   shortcutHints: document.getElementById("shortcut-hints"),
@@ -49,9 +51,14 @@ const els = {
   captureTabSetup: document.getElementById("capture-tab-setup"),
   captureTabSessions: document.getElementById("capture-tab-sessions"),
   captureTabTranscript: document.getElementById("capture-tab-transcript"),
+  detailTabTranscript: document.getElementById("detail-tab-transcript"),
+  detailTabTimeline: document.getElementById("detail-tab-timeline"),
+  detailTabTimelineCount: document.getElementById("detail-tab-timeline-count"),
   captureSetupPanel: document.getElementById("capture-setup-panel"),
   captureSessionsPanel: document.getElementById("capture-sessions-panel"),
   captureTranscriptPanel: document.getElementById("capture-transcript-panel"),
+  detailTranscriptPane: document.getElementById("detail-transcript-pane"),
+  detailEventsPane: document.getElementById("detail-events-pane"),
   settingsTabHealth: document.getElementById("settings-tab-health"),
   settingsTabDefaults: document.getElementById("settings-tab-defaults"),
   settingsTabTranscription: document.getElementById("settings-tab-transcription"),
@@ -196,6 +203,66 @@ function countWords(text) {
     return 0;
   }
   return cleaned.split(/\s+/).filter(Boolean).length;
+}
+
+function getSpeakerIdsFromText(text) {
+  const source = String(text || "");
+  const ids = new Set();
+  const regex = /\bSpeaker\s+(\d+):/g;
+  let match = regex.exec(source);
+  while (match) {
+    const id = Number.parseInt(match[1], 10);
+    if (Number.isInteger(id) && id >= 0) {
+      ids.add(id);
+    }
+    match = regex.exec(source);
+  }
+  return [...ids].sort((a, b) => a - b);
+}
+
+function getSpeakerIdsFromChunks(chunks) {
+  const ids = new Set();
+  for (const chunk of chunks || []) {
+    for (const id of getSpeakerIdsFromText(chunk?.text || "")) {
+      ids.add(id);
+    }
+  }
+  return [...ids].sort((a, b) => a - b);
+}
+
+function buildSpeakerAliasMap(events) {
+  const map = {};
+  for (const event of events || []) {
+    if (String(event?.event_type || "") !== "speaker_alias") {
+      continue;
+    }
+    const speakerId = Number.parseInt(String(event?.payload?.speaker_id), 10);
+    if (!Number.isInteger(speakerId) || speakerId < 0) {
+      continue;
+    }
+    const alias = String(event?.payload?.alias || "").trim();
+    if (!alias) {
+      delete map[speakerId];
+      continue;
+    }
+    map[speakerId] = alias;
+  }
+  return map;
+}
+
+function applySpeakerAliasesToText(text, aliasMap) {
+  const source = String(text || "");
+  if (!source) {
+    return "";
+  }
+  return source.replace(/\bSpeaker\s+(\d+):/g, (full, idText) => {
+    const id = Number.parseInt(String(idText), 10);
+    if (!Number.isInteger(id) || id < 0) {
+      return full;
+    }
+    const alias = String(aliasMap?.[id] || "").trim();
+    return alias ? `${alias}:` : full;
+  });
 }
 
 function formatPercent(value) {
@@ -683,6 +750,27 @@ function setCaptureSubView(nextSubView) {
   els.captureTabSetup.setAttribute("aria-selected", isSetup ? "true" : "false");
   els.captureTabSessions.setAttribute("aria-selected", isSessions ? "true" : "false");
   els.captureTabTranscript.setAttribute("aria-selected", isTranscript ? "true" : "false");
+}
+
+function setDetailSubView(nextSubView) {
+  const valid = ["transcript", "timeline"];
+  state.detailSubView = valid.includes(nextSubView) ? nextSubView : "transcript";
+  const isTranscript = state.detailSubView === "transcript";
+  const isTimeline = state.detailSubView === "timeline";
+  if (els.detailTranscriptPane) {
+    els.detailTranscriptPane.classList.toggle("hidden", !isTranscript);
+  }
+  if (els.detailEventsPane) {
+    els.detailEventsPane.classList.toggle("hidden", !isTimeline);
+  }
+  if (els.detailTabTranscript) {
+    els.detailTabTranscript.classList.toggle("active", isTranscript);
+    els.detailTabTranscript.setAttribute("aria-selected", isTranscript ? "true" : "false");
+  }
+  if (els.detailTabTimeline) {
+    els.detailTabTimeline.classList.toggle("active", isTimeline);
+    els.detailTabTimeline.setAttribute("aria-selected", isTimeline ? "true" : "false");
+  }
 }
 
 function setSettingsSubView(nextSubView) {
@@ -1304,20 +1392,273 @@ function renderDetailEstimate(chunks) {
   `;
 }
 
+async function saveSpeakerAlias(sessionId, speakerId, aliasInput, triggerButton, options = {}) {
+  const alias = String(aliasInput || "").trim();
+  const previousAlias = String(options.previousAlias || "").trim();
+  if (alias === previousAlias) {
+    return { skipped: true };
+  }
+  const button = triggerButton || null;
+  const buttonText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Saving...";
+  }
+  try {
+    await window.clipscribe.setSessionSpeakerAlias(sessionId, speakerId, alias);
+    await renderDetail();
+    showToast(alias ? `Speaker ${speakerId} renamed to "${alias}".` : `Speaker ${speakerId} reset.`);
+    return { skipped: false };
+  } catch (error) {
+    showToast(friendlyError(error), true);
+    return { skipped: false, error };
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = buttonText;
+    }
+  }
+}
+
+async function resetAllSpeakerAliases(sessionId, aliasMap, triggerButton) {
+  const resetIds = Object.keys(aliasMap || {})
+    .map((key) => Number.parseInt(key, 10))
+    .filter((id) => Number.isInteger(id) && id >= 0);
+  if (resetIds.length === 0) {
+    showToast("No speaker aliases to reset.");
+    return;
+  }
+  const button = triggerButton || null;
+  const previousText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Resetting...";
+  }
+  try {
+    for (const speakerId of resetIds) {
+      await window.clipscribe.setSessionSpeakerAlias(sessionId, speakerId, "");
+    }
+    await renderDetail();
+    showToast("All speaker aliases reset.");
+  } catch (error) {
+    showToast(friendlyError(error), true);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previousText;
+    }
+  }
+}
+
+function renderSpeakerAliasPanel(sessionId, speakerIds, aliasMap) {
+  if (!els.detailSpeakers) {
+    return;
+  }
+  const ids = [...new Set([...(speakerIds || []), ...Object.keys(aliasMap || {}).map((key) => Number(key))])]
+    .filter((id) => Number.isInteger(id) && id >= 0)
+    .sort((a, b) => a - b);
+  const hasAnyAlias = ids.some((id) => String(aliasMap?.[id] || "").trim());
+  if (ids.length === 0) {
+    els.detailSpeakers.classList.add("hidden");
+    els.detailSpeakers.innerHTML = "";
+    return;
+  }
+
+  const rows = ids
+    .map((speakerId) => {
+      const alias = String(aliasMap?.[speakerId] || "");
+      return `
+        <div class="speaker-alias-row">
+          <span class="speaker-alias-label">Speaker ${speakerId}</span>
+          <input
+            class="speaker-alias-input"
+            type="text"
+            data-speaker-alias-input="${speakerId}"
+            value="${safeText(alias)}"
+            placeholder="Name (optional)"
+          />
+          <button class="speaker-alias-save" type="button" data-speaker-alias-save="${speakerId}">
+            ${alias ? "Update" : "Set"}
+          </button>
+        </div>
+      `;
+    })
+    .join("");
+
+  els.detailSpeakers.classList.remove("hidden");
+  els.detailSpeakers.innerHTML = `
+    <div class="speaker-alias-head">
+      <p class="speaker-alias-title">Speaker Names (Session)</p>
+      ${
+        hasAnyAlias
+          ? '<button id="reset-speaker-aliases-btn" class="speaker-alias-reset" type="button">Reset All</button>'
+          : ""
+      }
+    </div>
+    <p class="speaker-alias-note muted">Update applies changes for this session transcript.</p>
+    <div class="speaker-alias-list">${rows}</div>
+  `;
+  const resetButton = els.detailSpeakers.querySelector("#reset-speaker-aliases-btn");
+  if (resetButton) {
+    resetButton.addEventListener("click", () => {
+      void resetAllSpeakerAliases(sessionId, aliasMap, resetButton);
+    });
+  }
+
+  const saveButtons = els.detailSpeakers.querySelectorAll("[data-speaker-alias-save]");
+  for (const button of saveButtons) {
+    const speakerId = Number.parseInt(button.dataset.speakerAliasSave, 10);
+    const input = els.detailSpeakers.querySelector(
+      `input[data-speaker-alias-input="${speakerId}"]`
+    );
+    if (!input || !Number.isInteger(speakerId)) {
+      continue;
+    }
+    input.dataset.lastSavedAlias = String(aliasMap?.[speakerId] || "").trim();
+    button.addEventListener("click", () => {
+      void saveSpeakerAlias(sessionId, speakerId, input.value, button, {
+        previousAlias: input.dataset.lastSavedAlias
+      });
+      input.dataset.lastSavedAlias = String(input.value || "").trim();
+      if (String(input.dataset.lastSavedAlias || "").trim()) {
+        button.textContent = "Update";
+      } else {
+        button.textContent = "Set";
+      }
+    });
+    input.addEventListener("input", () => {
+      const current = String(input.value || "").trim();
+      button.textContent = current ? "Update" : "Set";
+    });
+  }
+}
+
+function normalizeTimelineEvents(events) {
+  const rows = Array.isArray(events) ? events.slice() : [];
+  const normalized = [];
+  for (const event of rows) {
+    const type = String(event?.event_type || "");
+    if (type === "speaker_alias") {
+      const speakerId = Number.parseInt(String(event?.payload?.speaker_id), 10);
+      const atSec = Number(event?.at_sec || 0);
+      const prev = normalized[normalized.length - 1];
+      const prevType = String(prev?.event_type || "");
+      const prevSpeakerId = Number.parseInt(String(prev?.payload?.speaker_id), 10);
+      const prevAtSec = Number(prev?.at_sec || 0);
+      if (
+        prev &&
+        prevType === "speaker_alias" &&
+        Number.isInteger(speakerId) &&
+        speakerId >= 0 &&
+        speakerId === prevSpeakerId &&
+        Math.abs(atSec - prevAtSec) < 1
+      ) {
+        normalized[normalized.length - 1] = event;
+        continue;
+      }
+    }
+    normalized.push(event);
+  }
+  return normalized;
+}
+
+function describeTimelineEvent(event) {
+  const type = String(event?.event_type || "");
+  if (type === "warning" && event?.payload?.message) {
+    return {
+      tag: "warning",
+      tagClass: "warning",
+      message: String(event.payload.message || "").trim() || "Warning"
+    };
+  }
+  if (type === "speaker_alias") {
+    const speakerId = Number.parseInt(String(event?.payload?.speaker_id), 10);
+    const alias = String(event?.payload?.alias || "").trim();
+    if (Number.isInteger(speakerId) && speakerId >= 0) {
+      return {
+        tag: "speaker",
+        tagClass: "speaker",
+        message: alias
+          ? `Speaker ${speakerId} renamed to "${alias}".`
+          : `Speaker ${speakerId} name reset.`
+      };
+    }
+    return {
+      tag: "speaker",
+      tagClass: "speaker",
+      message: "Speaker alias updated."
+    };
+  }
+  if (type === "pause") {
+    return { tag: "capture", tagClass: "capture", message: "Recording paused." };
+  }
+  if (type === "resume") {
+    return { tag: "capture", tagClass: "capture", message: "Recording resumed." };
+  }
+  if (type === "stop") {
+    return { tag: "capture", tagClass: "capture", message: "Recording stopped." };
+  }
+  if (type === "interrupted") {
+    return {
+      tag: "capture",
+      tagClass: "capture",
+      message: "Session interrupted by app restart."
+    };
+  }
+  if (type === "source_change") {
+    const count = Array.isArray(event?.payload?.selected_sources)
+      ? event.payload.selected_sources.length
+      : 0;
+    return {
+      tag: "capture",
+      tagClass: "capture",
+      message: count > 0 ? `Source set updated (${count} selected).` : "Source set updated."
+    };
+  }
+  return {
+    tag: "event",
+    tagClass: "",
+    message: type || "event"
+  };
+}
+
+function renderTimelineCountBadge(count) {
+  if (!els.detailTabTimelineCount) {
+    return;
+  }
+  const safeCount = Math.max(0, Number.parseInt(String(count || 0), 10) || 0);
+  if (safeCount <= 0) {
+    els.detailTabTimelineCount.classList.add("hidden");
+    els.detailTabTimelineCount.textContent = "0";
+    return;
+  }
+  els.detailTabTimelineCount.classList.remove("hidden");
+  els.detailTabTimelineCount.textContent = String(safeCount);
+}
+
 async function renderDetail() {
   const eventScroll = captureScrollState(els.detailEvents);
   const chunkScroll = captureScrollState(els.detailChunks);
   els.detailChunks.innerHTML = "";
   els.detailEvents.innerHTML = "";
   els.detailMeta.textContent = "";
+  if (els.detailSpeakers) {
+    els.detailSpeakers.innerHTML = "";
+    els.detailSpeakers.classList.add("hidden");
+  }
   if (els.detailEstimate) {
     els.detailEstimate.innerHTML = "";
   }
   if (!state.selectedSessionId) {
-    const empty = document.createElement("div");
-    empty.className = "muted";
-    empty.textContent = "Select a session to view timeline and transcript chunks.";
-    els.detailEvents.appendChild(empty);
+    renderTimelineCountBadge(0);
+    const timelineEmpty = document.createElement("div");
+    timelineEmpty.className = "muted";
+    timelineEmpty.textContent = "Select a session to view timeline events.";
+    els.detailEvents.appendChild(timelineEmpty);
+    const transcriptEmpty = document.createElement("div");
+    transcriptEmpty.className = "muted";
+    transcriptEmpty.textContent = "Select a session to view transcript chunks.";
+    els.detailChunks.appendChild(transcriptEmpty);
     return;
   }
 
@@ -1329,23 +1670,32 @@ async function renderDetail() {
     return;
   }
   const session = detail.session;
+  const speakerAliasMap = buildSpeakerAliasMap(detail.events || []);
+  const speakerIds = getSpeakerIdsFromChunks(detail.chunks || []);
+  renderSpeakerAliasPanel(session.id, speakerIds, speakerAliasMap);
   els.detailMeta.textContent = `${session.status} | ${formatSeconds(getDisplayRecordedSeconds(session))}`;
   renderDetailEstimate(detail.chunks || []);
 
-  if ((detail.events || []).length === 0) {
+  const timelineEvents = normalizeTimelineEvents(detail.events || []);
+  renderTimelineCountBadge(timelineEvents.length);
+
+  if (timelineEvents.length === 0) {
     const emptyEvent = document.createElement("div");
     emptyEvent.className = "muted";
     emptyEvent.textContent = "No timeline events yet.";
     els.detailEvents.appendChild(emptyEvent);
   } else {
-    for (const event of detail.events || []) {
+    for (const event of timelineEvents) {
       const row = document.createElement("div");
       row.className = "event-row";
-      const message =
-        event?.event_type === "warning" && event?.payload?.message
-          ? `warning: ${event.payload.message}`
-          : String(event?.event_type || "");
-      row.textContent = `[${formatSeconds(event.at_sec)}] ${message}`;
+      const summary = describeTimelineEvent(event);
+      row.innerHTML = `
+        <div class="event-row-head">
+          <span class="event-time">[${safeText(formatSeconds(event.at_sec))}]</span>
+          <span class="event-tag ${safeText(summary.tagClass)}">${safeText(summary.tag)}</span>
+        </div>
+        <p class="event-message">${safeText(summary.message)}</p>
+      `;
       els.detailEvents.appendChild(row);
     }
   }
@@ -1364,7 +1714,8 @@ async function renderDetail() {
     const row = document.createElement("div");
     row.className = "chunk-row";
     const rawText = String(chunk.text || "");
-    let text = rawText;
+    const aliasedText = applySpeakerAliasesToText(rawText, speakerAliasMap);
+    let text = aliasedText;
     if (!text && chunk.status === "processing") {
       text = "(processing...)";
     } else if (!text && chunk.status === "done") {
@@ -1390,7 +1741,7 @@ async function renderDetail() {
     `;
     const copyBtn = row.querySelector("button[data-copy-chunk]");
     copyBtn.addEventListener("click", async () => {
-      await navigator.clipboard.writeText(chunk.text || "");
+      await navigator.clipboard.writeText(aliasedText || "");
       showToast("Chunk copied.");
     });
     els.detailChunks.appendChild(row);
@@ -1582,6 +1933,7 @@ function renderSourceSearch() {
 function renderAll() {
   setView(state.activeView);
   setCaptureSubView(state.captureSubView);
+  setDetailSubView(state.detailSubView);
   setSettingsSubView(state.settingsSubView);
   renderWorkspaceHeader();
   renderStatus();
@@ -1697,9 +2049,16 @@ async function copyAllTranscript() {
     return;
   }
   const detail = await window.clipscribe.getSessionDetail(state.selectedSessionId);
+  const speakerAliasMap = buildSpeakerAliasMap(detail.events || []);
   const chunksWithText = (detail.chunks || [])
     .filter((chunk) => chunk.text)
-    .map((chunk) => `[${formatSeconds(chunk.start_sec)}-${formatSeconds(chunk.end_sec)}]\n${chunk.text}`);
+    .map(
+      (chunk) =>
+        `[${formatSeconds(chunk.start_sec)}-${formatSeconds(chunk.end_sec)}]\n${applySpeakerAliasesToText(
+          chunk.text,
+          speakerAliasMap
+        )}`
+    );
   if (chunksWithText.length === 0) {
     showToast("No speech transcript text yet. Check source selection or record spoken audio.", true);
     return;
@@ -2055,6 +2414,12 @@ function wireEvents() {
   els.captureTabSetup.addEventListener("click", () => setCaptureSubView("setup"));
   els.captureTabSessions.addEventListener("click", () => setCaptureSubView("sessions"));
   els.captureTabTranscript.addEventListener("click", () => setCaptureSubView("transcript"));
+  if (els.detailTabTranscript) {
+    els.detailTabTranscript.addEventListener("click", () => setDetailSubView("transcript"));
+  }
+  if (els.detailTabTimeline) {
+    els.detailTabTimeline.addEventListener("click", () => setDetailSubView("timeline"));
+  }
 
   els.settingsTabHealth.addEventListener("click", () => setSettingsSubView("health"));
   els.settingsTabDefaults.addEventListener("click", () => setSettingsSubView("defaults"));

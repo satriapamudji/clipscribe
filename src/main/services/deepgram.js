@@ -23,6 +23,7 @@ function buildListenUrl(model) {
   url.searchParams.set("smart_format", "true");
   url.searchParams.set("utterances", "true");
   url.searchParams.set("paragraphs", "true");
+  url.searchParams.set("diarize", "true");
   return url.toString();
 }
 
