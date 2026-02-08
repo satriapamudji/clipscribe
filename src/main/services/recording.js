@@ -16,6 +16,7 @@ const {
 } = require("./ffmpeg");
 
 const CHUNK_RE = /^chunk_(\d{5})\.wav$/i;
+const DEFAULT_SUMMARY_MODEL = "openrouter/free";
 
 function nowIso() {
   return new Date().toISOString();
@@ -57,11 +58,47 @@ function getFileSizeBytes(filePath) {
   }
 }
 
+function buildSpeakerAliasMap(events) {
+  const aliasMap = {};
+  for (const event of events || []) {
+    if (String(event?.event_type || "") !== "speaker_alias") {
+      continue;
+    }
+    const speakerId = Number.parseInt(String(event?.payload?.speaker_id), 10);
+    if (!Number.isInteger(speakerId) || speakerId < 0) {
+      continue;
+    }
+    const alias = String(event?.payload?.alias || "").trim();
+    if (!alias) {
+      delete aliasMap[speakerId];
+    } else {
+      aliasMap[speakerId] = alias;
+    }
+  }
+  return aliasMap;
+}
+
+function applySpeakerAliases(text, aliasMap) {
+  const source = String(text || "");
+  if (!source) {
+    return "";
+  }
+  return source.replace(/\bSpeaker\s+(\d+):/g, (full, idText) => {
+    const speakerId = Number.parseInt(String(idText), 10);
+    if (!Number.isInteger(speakerId) || speakerId < 0) {
+      return full;
+    }
+    const alias = String(aliasMap?.[speakerId] || "").trim();
+    return alias ? `${alias}:` : full;
+  });
+}
+
 function createRecordingService({
   repo,
   settingsService,
   transcriptionWorker,
-  eventSink
+  eventSink,
+  summaryService
 }) {
   const runtime = new Map();
 
@@ -74,6 +111,18 @@ function createRecordingService({
   function emitGlobal() {
     if (eventSink && typeof eventSink.onGlobalUpdated === "function") {
       eventSink.onGlobalUpdated();
+    }
+  }
+
+  function emitSummaryProgress(sessionId, status, percent, message) {
+    if (eventSink && typeof eventSink.onSummaryProgress === "function") {
+      eventSink.onSummaryProgress({
+        sessionId,
+        status: String(status || "running"),
+        percent: Math.max(0, Math.min(100, Number(percent || 0))),
+        message: String(message || "").trim(),
+        at: nowIso()
+      });
     }
   }
 
@@ -504,6 +553,119 @@ function createRecordingService({
     runtime.delete(sessionId);
     emitSession(sessionId);
     emitGlobal();
+    maybeAutoGenerateSummary(session.id);
+  }
+
+  function maybeAutoGenerateSummary(sessionId) {
+    const settings = settingsService.getSettings();
+    const apiKey = String(settings?.openrouter_api_key || "").trim();
+    if (!apiKey || !summaryService || typeof summaryService.summarizeTranscript !== "function") {
+      return;
+    }
+    const session = repo.getSession(sessionId);
+    if (!session || session.status !== "stopped") {
+      return;
+    }
+    if (String(session.summary_text || "").trim()) {
+      return;
+    }
+    const hasTranscriptText = repo
+      .listSessionChunks(sessionId)
+      .some(
+        (chunk) =>
+          String(chunk?.status || "") === "done" && Boolean(String(chunk?.text || "").trim())
+      );
+    if (!hasTranscriptText) {
+      return;
+    }
+    void generateSessionSummary(sessionId).catch((error) => {
+      const latest = repo.getSession(sessionId);
+      if (!latest) {
+        return;
+      }
+      repo.addEvent(sessionId, "warning", Number(latest.recorded_seconds || 0), {
+        code: "auto_summary_failed",
+        message: `Auto-summary failed: ${String(error?.message || error || "Unknown error.")}`
+      });
+      emitSession(sessionId);
+    });
+  }
+
+  async function generateSessionSummary(sessionId) {
+    const session = repo.getSession(sessionId);
+    if (!session) {
+      throw new Error("Session not found.");
+    }
+    if (session.status !== "stopped") {
+      throw new Error("Summary is only available after a session is stopped.");
+    }
+    if (!summaryService || typeof summaryService.summarizeTranscript !== "function") {
+      throw new Error("Summary service is not available.");
+    }
+
+    emitSummaryProgress(sessionId, "running", 5, "Preparing transcript");
+    try {
+      const chunks = repo
+        .listSessionChunks(sessionId)
+        .filter((chunk) => String(chunk?.status || "") === "done")
+        .filter((chunk) => String(chunk?.text || "").trim());
+      if (chunks.length === 0) {
+        throw new Error("No transcript text available yet for this session.");
+      }
+      const events = repo.listSessionEvents(sessionId);
+      const aliasMap = buildSpeakerAliasMap(events);
+      const transcriptText = chunks
+        .map((chunk) => {
+          const start = Number(chunk.start_sec || 0);
+          const end = Number(chunk.end_sec || 0);
+          const text = applySpeakerAliases(chunk.text || "", aliasMap).trim();
+          if (!text) {
+            return "";
+          }
+          return `[${start.toFixed(2)}-${end.toFixed(2)}]\n${text}`;
+        })
+        .filter(Boolean)
+        .join("\n\n");
+
+      emitSummaryProgress(sessionId, "running", 35, "Drafting summary");
+      const settings = settingsService.getSettings();
+      const result = await summaryService.summarizeTranscript({
+        apiKey: settings.openrouter_api_key,
+        model: settings.openrouter_model || DEFAULT_SUMMARY_MODEL,
+        sessionTitle: session.title,
+        transcriptText
+      });
+
+      emitSummaryProgress(sessionId, "running", 72, "Writing session brief");
+      const briefText =
+        summaryService && typeof summaryService.summarizeSessionBrief === "function"
+          ? await summaryService.summarizeSessionBrief({
+              apiKey: settings.openrouter_api_key,
+              model: settings.openrouter_model || DEFAULT_SUMMARY_MODEL,
+              sessionTitle: session.title,
+              transcriptText,
+              summaryText: result.summary
+            })
+          : "";
+
+      emitSummaryProgress(sessionId, "running", 92, "Saving summary");
+      const updated = repo.updateSessionSummary(
+        sessionId,
+        result.summary,
+        result.model,
+        String(briefText || "").trim()
+      );
+      repo.addEvent(sessionId, "summary_generated", Number(updated.recorded_seconds || 0), {
+        model: result.model || settings.openrouter_model || DEFAULT_SUMMARY_MODEL
+      });
+      emitSummaryProgress(sessionId, "done", 100, "Summary ready");
+      emitSession(sessionId);
+      emitGlobal();
+      return updated;
+    } catch (error) {
+      emitSummaryProgress(sessionId, "error", 100, String(error?.message || "Summary failed."));
+      throw error;
+    }
   }
 
   function setSpeakerAlias(sessionId, speakerId, alias) {
@@ -648,6 +810,7 @@ function createRecordingService({
     pauseSession,
     resumeSession,
     stopSession,
+    generateSessionSummary,
     setSpeakerAlias,
     changeSessionSources,
     getSessionDetail,

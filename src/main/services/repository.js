@@ -47,11 +47,13 @@ function createRepository(db) {
   const createSessionStmt = db.prepare(`
     INSERT INTO sessions (
       id, folder_id, title, status, started_at, ended_at, chunk_seconds,
-      audio_master_path, session_dir, selected_sources_json, recorded_seconds,
+      audio_master_path, summary_text, summary_brief_text, summary_model, summary_generated_at,
+      session_dir, selected_sources_json, recorded_seconds,
       created_at, updated_at
     ) VALUES (
       @id, @folder_id, @title, @status, @started_at, @ended_at, @chunk_seconds,
-      @audio_master_path, @session_dir, @selected_sources_json, @recorded_seconds,
+      @audio_master_path, @summary_text, @summary_brief_text, @summary_model, @summary_generated_at,
+      @session_dir, @selected_sources_json, @recorded_seconds,
       @created_at, @updated_at
     )
   `);
@@ -76,6 +78,15 @@ function createRepository(db) {
   `);
   const renameSessionStmt = db.prepare(`
     UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?
+  `);
+  const updateSessionSummaryStmt = db.prepare(`
+    UPDATE sessions
+    SET summary_text = @summary_text,
+        summary_brief_text = @summary_brief_text,
+        summary_model = @summary_model,
+        summary_generated_at = @summary_generated_at,
+        updated_at = @updated_at
+    WHERE id = @id
   `);
   const deleteSessionStmt = db.prepare(`DELETE FROM sessions WHERE id = ?`);
   const listActiveSessionsStmt = db.prepare(`
@@ -199,6 +210,10 @@ function createRepository(db) {
         ended_at: null,
         chunk_seconds: chunkSeconds,
         audio_master_path: null,
+        summary_text: null,
+        summary_brief_text: null,
+        summary_model: null,
+        summary_generated_at: null,
         session_dir: sessionDir,
         selected_sources_json: JSON.stringify(selectedSources || []),
         recorded_seconds: 0,
@@ -247,6 +262,22 @@ function createRepository(db) {
         throw new Error("Session title is required.");
       }
       renameSessionStmt.run(trimmed, nowIso(), sessionId);
+      return toSessionRow(getSessionStmt.get(sessionId));
+    },
+
+    updateSessionSummary(sessionId, summaryText, summaryModel, summaryBriefText = "") {
+      const session = getSessionStmt.get(sessionId);
+      if (!session) {
+        throw new Error("Session not found.");
+      }
+      updateSessionSummaryStmt.run({
+        id: sessionId,
+        summary_text: String(summaryText || "").trim() || null,
+        summary_brief_text: String(summaryBriefText || "").trim() || null,
+        summary_model: String(summaryModel || "").trim() || null,
+        summary_generated_at: nowIso(),
+        updated_at: nowIso()
+      });
       return toSessionRow(getSessionStmt.get(sessionId));
     },
 

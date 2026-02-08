@@ -1,11 +1,14 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { getSettingsPath, getStorageRoot } = require("./paths");
+const DEFAULT_SUMMARY_MODEL = "meta-llama/llama-3.1-70b-instruct:free";
 
 const DEFAULT_SETTINGS = Object.freeze({
   chunk_seconds: 120,
   deepgram_api_key: "",
   deepgram_model: "nova-3",
+  openrouter_api_key: "",
+  openrouter_model: DEFAULT_SUMMARY_MODEL,
   ffmpeg_path: "ffmpeg",
   ffprobe_path: "ffprobe",
   storage_root: "",
@@ -27,6 +30,9 @@ function readSettings() {
   try {
     const raw = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
     const merged = { ...DEFAULT_SETTINGS, ...raw };
+    if (!String(merged.openrouter_model || "").trim()) {
+      merged.openrouter_model = DEFAULT_SUMMARY_MODEL;
+    }
     if (!merged.storage_root) {
       merged.storage_root = getStorageRoot();
     }

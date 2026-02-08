@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld("clipscribe", {
   updateSettings: (partial) => invoke("settings:update", partial),
   autoDetectFfmpeg: () => invoke("settings:auto-detect-ffmpeg"),
   getDeepgramUsageBreakdown: (payload) => invoke("deepgram:usage-breakdown", payload),
+  listDeepgramModels: () => invoke("deepgram:list-models"),
+  listOpenRouterFreeModels: () => invoke("openrouter:list-free-models"),
+  getOpenRouterKeyInfo: () => invoke("openrouter:key-info"),
 
   createFolder: (name) => invoke("folders:create", name),
   deleteFolder: (folderId) => invoke("folders:delete", folderId),
@@ -23,6 +26,7 @@ contextBridge.exposeInMainWorld("clipscribe", {
   getSession: (sessionId) => invoke("sessions:get", sessionId),
   moveSession: (sessionId, folderId) => invoke("sessions:move", { sessionId, folderId }),
   renameSession: (sessionId, title) => invoke("sessions:rename", { sessionId, title }),
+  generateSessionSummary: (sessionId) => invoke("sessions:generate-summary", sessionId),
   setSessionSpeakerAlias: (sessionId, speakerId, alias) =>
     invoke("sessions:set-speaker-alias", { sessionId, speakerId, alias }),
   deleteSession: (sessionId) => invoke("sessions:delete", sessionId),
@@ -42,5 +46,10 @@ contextBridge.exposeInMainWorld("clipscribe", {
     const handler = (_evt, payload) => cb(payload);
     ipcRenderer.on("app:session-updated", handler);
     return () => ipcRenderer.removeListener("app:session-updated", handler);
+  },
+  onSummaryProgress: (cb) => {
+    const handler = (_evt, payload) => cb(payload);
+    ipcRenderer.on("app:summary-progress", handler);
+    return () => ipcRenderer.removeListener("app:summary-progress", handler);
   }
 });

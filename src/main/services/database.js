@@ -28,6 +28,10 @@ function initDatabase(dbPath) {
       ended_at TEXT,
       chunk_seconds INTEGER NOT NULL,
       audio_master_path TEXT,
+      summary_text TEXT,
+      summary_brief_text TEXT,
+      summary_model TEXT,
+      summary_generated_at TEXT,
       session_dir TEXT NOT NULL,
       selected_sources_json TEXT NOT NULL,
       recorded_seconds REAL NOT NULL DEFAULT 0,
@@ -75,6 +79,23 @@ function initDatabase(dbPath) {
   }
   if (!chunkColumns.includes("meta_json")) {
     db.exec("ALTER TABLE transcript_chunks ADD COLUMN meta_json TEXT");
+  }
+
+  const sessionColumns = db
+    .prepare("PRAGMA table_info(sessions)")
+    .all()
+    .map((col) => col.name);
+  if (!sessionColumns.includes("summary_text")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN summary_text TEXT");
+  }
+  if (!sessionColumns.includes("summary_brief_text")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN summary_brief_text TEXT");
+  }
+  if (!sessionColumns.includes("summary_model")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN summary_model TEXT");
+  }
+  if (!sessionColumns.includes("summary_generated_at")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN summary_generated_at TEXT");
   }
 
   return db;

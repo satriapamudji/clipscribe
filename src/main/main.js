@@ -236,7 +236,13 @@ function initServices() {
   const { createRepository } = require("./services/repository");
   const { createSettingsService } = require("./services/settings");
   const { createTranscriptionWorker } = require("./services/transcription");
-  const { getUsageBreakdown } = require("./services/deepgram");
+  const { getUsageBreakdown, listSttModels } = require("./services/deepgram");
+  const {
+    summarizeTranscript,
+    summarizeSessionBrief,
+    listFreeModels,
+    getCurrentKeyInfo
+  } = require("./services/openrouter");
   const { createRecordingService } = require("./services/recording");
 
   const appDataRoot = path.join(process.cwd(), "app-data");
@@ -261,6 +267,9 @@ function initServices() {
     },
     onGlobalUpdated() {
       sendUpdate("app:global-updated", { at: new Date().toISOString() });
+    },
+    onSummaryProgress(payload) {
+      sendUpdate("app:summary-progress", payload || {});
     }
   };
 
@@ -273,7 +282,8 @@ function initServices() {
     repo,
     settingsService,
     transcriptionWorker,
-    eventSink
+    eventSink,
+    summaryService: { summarizeTranscript, summarizeSessionBrief }
   });
 
   recordingService.recoverInterruptedSessions();
@@ -285,7 +295,10 @@ function initServices() {
     settingsService,
     transcriptionWorker,
     recordingService,
-    deepgramUsage: getUsageBreakdown
+    deepgramUsage: getUsageBreakdown,
+    deepgramListModels: listSttModels,
+    openrouterListFreeModels: listFreeModels,
+    openrouterKeyInfo: getCurrentKeyInfo
   };
 }
 
@@ -433,6 +446,51 @@ function registerIpc() {
     }
   });
 
+  safeHandle("deepgram:list-models", async () => {
+    const settings = services.settingsService.getSettings();
+    const apiKey = String(settings?.deepgram_api_key || "").trim();
+    return services.deepgramListModels({ apiKey });
+  });
+
+  safeHandle("openrouter:list-free-models", async () => {
+    return services.openrouterListFreeModels();
+  });
+
+  safeHandle("openrouter:key-info", async () => {
+    const settings = services.settingsService.getSettings();
+    const apiKey = String(settings?.openrouter_api_key || "").trim();
+    if (!apiKey) {
+      return {
+        ok: false,
+        code: "missing_key",
+        message: "OpenRouter API key is missing."
+      };
+    }
+    try {
+      const key = await services.openrouterKeyInfo({ apiKey });
+      return { ok: true, key };
+    } catch (error) {
+      const message = String(error?.message || error || "");
+      const lower = message.toLowerCase();
+      if (lower.includes("openrouter key error 401")) {
+        return {
+          ok: false,
+          code: "unauthorized",
+          message: "OpenRouter API key is invalid."
+        };
+      }
+      if (lower.includes("openrouter key error 403")) {
+        return {
+          ok: false,
+          code: "forbidden",
+          message:
+            "This OpenRouter key cannot read account usage metadata. Use a key with usage visibility."
+        };
+      }
+      throw error;
+    }
+  });
+
   safeHandle("folders:create", async (_, name) => {
     const folder = services.repo.createFolder(name);
     sendUpdate("app:global-updated", { at: new Date().toISOString() });
@@ -483,6 +541,10 @@ function registerIpc() {
     const renamed = services.recordingService.renameSession(sessionId, title);
     sendUpdate("app:global-updated", { at: new Date().toISOString() });
     return renamed;
+  });
+
+  safeHandle("sessions:generate-summary", async (_, sessionId) => {
+    return services.recordingService.generateSessionSummary(sessionId);
   });
 
   safeHandle("sessions:set-speaker-alias", async (_, { sessionId, speakerId, alias }) => {

@@ -1,4 +1,22 @@
 /* global navigator */
+const DEFAULT_SUMMARY_MODEL = "openrouter/free";
+const FREE_OPENROUTER_MODELS = [
+  DEFAULT_SUMMARY_MODEL,
+  "meta-llama/llama-3.1-70b-instruct:free",
+  "mistralai/mistral-small-3.1-24b-instruct:free",
+  "google/gemma-3-27b-it:free",
+  "google/gemma-3-12b-it:free",
+  "qwen/qwen-2.5-72b-instruct:free"
+];
+const DEFAULT_DEEPGRAM_MODELS = [
+  "nova-3",
+  "nova-2",
+  "nova-2-general",
+  "nova-2-meeting",
+  "nova-2-phonecall",
+  "nova-2-video",
+  "nova-2-conversationalai"
+];
 
 const state = {
   settings: null,
@@ -9,8 +27,9 @@ const state = {
   selectedSessionId: null,
   activeView: "capture",
   captureSubView: "setup",
-  detailSubView: "transcript",
+  detailSubView: "timeline",
   settingsSubView: "health",
+  transcriptionSubView: "providers",
   sourcePickerOpen: false,
   sourceFilter: "all",
   sourceSearch: "",
@@ -20,7 +39,19 @@ const state = {
   lastTestClip: null,
   usageBreakdown: null,
   usageLoading: false,
-  usageError: ""
+  usageError: "",
+  summaryGenerating: false,
+  summaryProgress: null,
+  deepgramModels: [...DEFAULT_DEEPGRAM_MODELS],
+  deepgramModelsLoading: false,
+  deepgramModelsStatus: "",
+  deepgramRateSuggestion: 0.0043,
+  openRouterModels: [...FREE_OPENROUTER_MODELS],
+  openRouterModelsLoading: false,
+  openRouterModelsStatus: "",
+  openRouterUsage: null,
+  openRouterUsageError: "",
+  openRouterUsageLoading: false
 };
 
 const els = {
@@ -32,6 +63,9 @@ const els = {
   detailEvents: document.getElementById("detail-events"),
   detailMeta: document.getElementById("detail-meta"),
   detailEstimate: document.getElementById("detail-estimate"),
+  detailSummaryPanel: document.getElementById("detail-summary-panel"),
+  detailSummaryMeta: document.getElementById("detail-summary-meta"),
+  detailSummaryText: document.getElementById("detail-summary-text"),
   detailSpeakers: document.getElementById("detail-speakers"),
   workspaceTitle: document.getElementById("workspace-title"),
   workspaceSubtitle: document.getElementById("workspace-subtitle"),
@@ -52,12 +86,14 @@ const els = {
   captureTabSessions: document.getElementById("capture-tab-sessions"),
   captureTabTranscript: document.getElementById("capture-tab-transcript"),
   detailTabTranscript: document.getElementById("detail-tab-transcript"),
+  detailTabSummary: document.getElementById("detail-tab-summary"),
   detailTabTimeline: document.getElementById("detail-tab-timeline"),
   detailTabTimelineCount: document.getElementById("detail-tab-timeline-count"),
   captureSetupPanel: document.getElementById("capture-setup-panel"),
   captureSessionsPanel: document.getElementById("capture-sessions-panel"),
   captureTranscriptPanel: document.getElementById("capture-transcript-panel"),
   detailTranscriptPane: document.getElementById("detail-transcript-pane"),
+  detailSummaryPane: document.getElementById("detail-summary-pane"),
   detailEventsPane: document.getElementById("detail-events-pane"),
   settingsTabHealth: document.getElementById("settings-tab-health"),
   settingsTabDefaults: document.getElementById("settings-tab-defaults"),
@@ -65,6 +101,10 @@ const els = {
   settingsHealthPanel: document.getElementById("settings-health-panel"),
   settingsDefaultsPanel: document.getElementById("settings-defaults-panel"),
   settingsTranscriptionPanel: document.getElementById("settings-transcription-panel"),
+  transcriptionTabProviders: document.getElementById("transcription-tab-providers"),
+  transcriptionTabUsage: document.getElementById("transcription-tab-usage"),
+  transcriptionProvidersPane: document.getElementById("transcription-providers-pane"),
+  transcriptionUsagePane: document.getElementById("transcription-usage-pane"),
   sourcePickerToggle: document.getElementById("source-picker-toggle"),
   testSelectedSourceBtn: document.getElementById("test-selected-source-btn"),
   sourcePickerPanel: document.getElementById("source-picker-panel"),
@@ -84,6 +124,7 @@ const els = {
   stopBtn: document.getElementById("stop-btn"),
   copyAllBtn: document.getElementById("copy-all-btn"),
   openTranscriptBtn: document.getElementById("open-transcript-btn"),
+  generateSummaryBtn: document.getElementById("generate-summary-btn"),
   renameSessionBtn: document.getElementById("rename-session-btn"),
   deleteSessionBtn: document.getElementById("delete-session-btn"),
   newFolderBtn: document.getElementById("new-folder-btn"),
@@ -97,10 +138,23 @@ const els = {
   deepgramApiKey: document.getElementById("deepgram-api-key"),
   deepgramProjectId: document.getElementById("deepgram-project-id"),
   deepgramModel: document.getElementById("deepgram-model"),
+  refreshDeepgramModelsBtn: document.getElementById("refresh-deepgram-models-btn"),
+  deepgramModelsStatus: document.getElementById("deepgram-models-status"),
   preprocessProfile: document.getElementById("preprocess-profile"),
   preprocessTimeoutMs: document.getElementById("preprocess-timeout-ms"),
+  openrouterApiKey: document.getElementById("openrouter-api-key"),
+  openrouterModel: document.getElementById("openrouter-model"),
+  openrouterModelCustom: document.getElementById("openrouter-model-custom"),
+  refreshOpenRouterModelsBtn: document.getElementById("refresh-openrouter-models-btn"),
+  openRouterModelsStatus: document.getElementById("openrouter-models-status"),
+  refreshOpenRouterUsageBtn: document.getElementById("refresh-openrouter-usage-btn"),
+  openRouterUsageSummary: document.getElementById("openrouter-usage-summary"),
+  openRouterUsageList: document.getElementById("openrouter-usage-list"),
   estimatedSttUsdPerMin: document.getElementById("estimated-stt-usd-per-min"),
+  estimatedSttHint: document.getElementById("estimated-stt-hint"),
   saveSettingsBtn: document.getElementById("save-settings-btn"),
+  detailGenerateSummaryBtn: document.getElementById("detail-generate-summary-btn"),
+  detailCopySummaryBtn: document.getElementById("detail-copy-summary-btn"),
   refreshUsageBtn: document.getElementById("refresh-usage-btn"),
   usageStartDate: document.getElementById("usage-start-date"),
   usageEndDate: document.getElementById("usage-end-date"),
@@ -158,6 +212,30 @@ function friendlyError(errorLike) {
   }
   if (message.toLowerCase().includes("compiled against a different node.js version")) {
     return "Native module ABI mismatch. Run repair-native, then restart the app.";
+  }
+  if (message.toLowerCase().includes("openrouter api key is missing")) {
+    return "OpenRouter API key is missing. Add it in Transcription Settings to generate summaries.";
+  }
+  if (message.toLowerCase().includes("openrouter error 401")) {
+    return "OpenRouter authentication failed. Check your OpenRouter API key.";
+  }
+  if (message.toLowerCase().includes("openrouter error 402")) {
+    return `OpenRouter rejected the request for billing/credit reasons. Use a free model such as ${DEFAULT_SUMMARY_MODEL}.`;
+  }
+  if (message.toLowerCase().includes("openrouter models error")) {
+    return "Could not load free model list from OpenRouter. Check internet connectivity and try again.";
+  }
+  if (message.toLowerCase().includes("openrouter key error 401")) {
+    return "OpenRouter usage check failed: invalid API key.";
+  }
+  if (message.toLowerCase().includes("openrouter key error 403")) {
+    return "OpenRouter usage check failed: this key cannot read usage metadata.";
+  }
+  if (message.toLowerCase().includes("openrouter returned an empty summary")) {
+    return `The model returned no visible text (likely output token exhaustion). Auto-fallback is enabled; try Regenerate once. If it persists, use ${DEFAULT_SUMMARY_MODEL}.`;
+  }
+  if (message.toLowerCase().includes("deepgram error") && message.toLowerCase().includes("/v1/models")) {
+    return "Could not sync Deepgram models. Check API key/network and try again.";
   }
   if (message.toLowerCase().includes("usage/breakdown")) {
     return "Deepgram usage query was rejected. Try grouping=none, clear Project ID, and keep a short recent date range, then refresh again.";
@@ -265,6 +343,335 @@ function applySpeakerAliasesToText(text, aliasMap) {
   });
 }
 
+function normalizeClockToken(token) {
+  const raw = String(token || "").trim();
+  const parts = raw.split(":").map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 2 || parts.length > 3 || parts.some((part) => !/^\d+$/.test(part))) {
+    return raw;
+  }
+  if (parts.length === 2) {
+    const [mm, ss] = parts;
+    return `00:${mm.padStart(2, "0")}:${ss.padStart(2, "0")}`;
+  }
+  const [hh, mm, ss] = parts;
+  return `${hh.padStart(2, "0")}:${mm.padStart(2, "0")}:${ss.padStart(2, "0")}`;
+}
+
+function parseTranscriptDisplayRows(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  return lines.map((line) => {
+    const raw = String(line || "");
+    const timedMatch = raw.match(/^\[(.+?)\s*-\s*(.+?)\]\s*(.*)$/);
+    if (!timedMatch) {
+      return {
+        kind: "raw",
+        raw
+      };
+    }
+
+    const start = normalizeClockToken(timedMatch[1]);
+    const end = normalizeClockToken(timedMatch[2]);
+    const trailing = String(timedMatch[3] || "").trim();
+    const speakerMatch = trailing.match(/^([^:]{1,80}):\s*(.*)$/);
+    if (!speakerMatch) {
+      return {
+        kind: "timed",
+        range: `[${start}-${end}]`,
+        speaker: "",
+        content: trailing
+      };
+    }
+    return {
+      kind: "timed",
+      range: `[${start}-${end}]`,
+      speaker: String(speakerMatch[1] || "").trim(),
+      content: String(speakerMatch[2] || "").trim()
+    };
+  });
+}
+
+function buildChunkTextMarkup(text) {
+  const rows = parseTranscriptDisplayRows(text);
+  const hasTimed = rows.some((row) => row.kind === "timed");
+  if (!hasTimed) {
+    return `<div class="chunk-text-plain">${safeText(text)}</div>`;
+  }
+
+  const html = rows
+    .map((row) => {
+      if (row.kind !== "timed") {
+        const raw = String(row.raw || "").trim();
+        return `<div class="chunk-line raw"><span class="chunk-line-content">${safeText(raw)}</span></div>`;
+      }
+      const speaker = String(row.speaker || "").trim();
+      const content = String(row.content || "").trim();
+      const speakerHtml = speaker
+        ? `<span class="chunk-line-speaker">${safeText(speaker)}:</span>`
+        : '<span class="chunk-line-speaker"></span>';
+      return `
+        <div class="chunk-line">
+          <span class="chunk-line-range">${safeText(row.range || "")}</span>
+          ${speakerHtml}
+          <span class="chunk-line-content">${safeText(content)}</span>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `<div class="chunk-lines">${html}</div>`;
+}
+
+function unwrapMarkdownCodeFence(text) {
+  const raw = String(text || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const fenced = raw.match(/^```(?:markdown|md)?\s*([\s\S]*?)\s*```$/i);
+  return fenced ? String(fenced[1] || "").trim() : raw;
+}
+
+function markdownToPlainText(text) {
+  const unfenced = unwrapMarkdownCodeFence(text);
+  if (!unfenced) {
+    return "";
+  }
+  return unfenced
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*\d+[.)]\s+/gm, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/\*(.*?)\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[(.*?)\]\([^)]+\)/g, "$1")
+    .replace(/\n{2,}/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+}
+
+function sanitizeExternalUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (/^https?:\/\//i.test(raw) || /^mailto:/i.test(raw)) {
+    return raw;
+  }
+  return "";
+}
+
+function renderInlineMarkdown(text) {
+  const raw = String(text || "");
+  if (!raw) {
+    return "";
+  }
+  const codeTokens = [];
+  let html = safeText(raw);
+
+  html = html.replace(/`([^`]+)`/g, (_m, codeText) => {
+    const token = `@@CODE_${codeTokens.length}@@`;
+    codeTokens.push(`<code>${codeText}</code>`);
+    return token;
+  });
+
+  html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label, href) => {
+    const safeHref = sanitizeExternalUrl(href);
+    if (!safeHref) {
+      return label;
+    }
+    return `<a href="${safeText(safeHref)}" target="_blank" rel="noreferrer noopener">${label}</a>`;
+  });
+
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+
+  html = html.replace(/@@CODE_(\d+)@@/g, (_m, idxText) => {
+    const idx = Number.parseInt(String(idxText), 10);
+    return codeTokens[idx] || "";
+  });
+
+  return html;
+}
+
+function markdownToSafeHtml(text) {
+  const source = unwrapMarkdownCodeFence(text).replace(/\r/g, "").trim();
+  if (!source) {
+    return "";
+  }
+  const lines = source.split("\n");
+  const blocks = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = String(lines[i] || "");
+    const trimmed = line.trim();
+    if (!trimmed) {
+      i += 1;
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = Math.min(6, Math.max(1, headingMatch[1].length));
+      blocks.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
+      i += 1;
+      continue;
+    }
+
+    if (/^\s*[-*+]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
+        items.push(String(lines[i]).replace(/^\s*[-*+]\s+/, "").trim());
+        i += 1;
+      }
+      blocks.push(`<ul>${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ul>`);
+      continue;
+    }
+
+    if (/^\s*\d+[.)]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
+        items.push(String(lines[i]).replace(/^\s*\d+[.)]\s+/, "").trim());
+        i += 1;
+      }
+      blocks.push(`<ol>${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ol>`);
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const quoteLines = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        quoteLines.push(String(lines[i]).replace(/^\s*>\s?/, "").trim());
+        i += 1;
+      }
+      blocks.push(`<blockquote>${quoteLines.map((row) => renderInlineMarkdown(row)).join("<br />")}</blockquote>`);
+      continue;
+    }
+
+    const paragraph = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !/^(#{1,6})\s+/.test(lines[i].trim()) &&
+      !/^\s*[-*+]\s+/.test(lines[i]) &&
+      !/^\s*\d+[.)]\s+/.test(lines[i]) &&
+      !/^\s*>\s?/.test(lines[i])
+    ) {
+      paragraph.push(String(lines[i]).trim());
+      i += 1;
+    }
+    blocks.push(`<p>${renderInlineMarkdown(paragraph.join(" "))}</p>`);
+  }
+
+  return blocks.join("");
+}
+
+function stripSummarySectionTitle(line) {
+  const stripped = String(line || "").replace(/^#{1,6}\s*/g, "").trim();
+  const match = stripped.match(
+    /^(executive summary|key points|decisions|action items|open questions|next steps)\s*[:\-]?\s*$/i
+  );
+  if (!match) {
+    return stripped;
+  }
+  const normalized = String(match[1] || "").toLowerCase();
+  if (normalized === "executive summary") return "Executive Summary";
+  if (normalized === "key points") return "Key Points";
+  if (normalized === "decisions") return "Decisions";
+  if (normalized === "action items") return "Action Items";
+  if (normalized === "open questions") return "Open Questions";
+  if (normalized === "next steps") return "Next Steps";
+  return stripped;
+}
+
+function normalizeSummaryTextForUi(summaryText) {
+  const plain = markdownToPlainText(summaryText);
+  if (!plain) {
+    return "";
+  }
+  const lines = plain.split(/\r?\n/).map((line) => line.trimEnd());
+  const normalized = [];
+  for (const line of lines) {
+    const cleaned = stripSummarySectionTitle(line);
+    if (!cleaned) {
+      normalized.push("");
+      continue;
+    }
+    normalized.push(cleaned);
+  }
+  return normalized
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractExecutiveSummaryPreview(summaryText) {
+  const plain = markdownToPlainText(summaryText);
+  if (!plain) {
+    return "";
+  }
+  const normalized = plain.replace(/\r/g, "").trim();
+  const sectionMatch = normalized.match(
+    /(?:^|\n)\s*executive summary\s*[:\-]?\s*([\s\S]*?)(?:\n\s*(?:key points|decisions|action items|open questions|next steps)\s*[:\-]?\s*|$)/i
+  );
+  const source = sectionMatch ? String(sectionMatch[1] || "") : normalized;
+  const flattened = source
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^meeting notes\b/i.test(line))
+    .join(" ");
+  if (!flattened) {
+    return "";
+  }
+  const sentenceMatch = flattened.match(/^(.{1,190}?[.!?])(?:\s|$)/);
+  return (sentenceMatch ? sentenceMatch[1] : flattened).trim();
+}
+
+function toObjectiveSessionBlurb(text) {
+  let value = String(text || "").replace(/\s+/g, " ").trim();
+  if (!value) {
+    return "";
+  }
+  value = value
+    .replace(
+      /^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\s+(discuss(?:ed|es)?|talk(?:ed|s)? about|shared|reflect(?:ed|s) on|explain(?:ed|s)?|describe(?:d|s)?|mention(?:ed|s)?)\s+/i,
+      "Discussion covered "
+    )
+    .replace(/^(He|She|They|We|I)\s+/i, "")
+    .replace(/^\s*(This session|The session)\s+/i, "")
+    .trim();
+
+  if (!/^(Focus:|Discussion covered)/i.test(value)) {
+    value = `Focus: ${value.charAt(0).toLowerCase()}${value.slice(1)}`;
+  }
+  return value;
+}
+
+function buildSessionSummaryPreview(session) {
+  const brief = String(session?.summary_brief_text || "").replace(/\s+/g, " ").trim();
+  if (brief) {
+    return brief;
+  }
+  const previewFromSummary = extractExecutiveSummaryPreview(session?.summary_text || "");
+  const hasSummaryAutomation = Boolean(String(state.settings?.openrouter_api_key || "").trim());
+  if (previewFromSummary) {
+    const candidate = toObjectiveSessionBlurb(previewFromSummary).replace(/\s+/g, " ").trim();
+    const sentences = candidate.match(/[^.!?]+[.!?]+/g);
+    if (Array.isArray(sentences) && sentences.length >= 2) {
+      return `${sentences[0].trim()} ${sentences[1].trim()}`.trim();
+    }
+    return candidate;
+  }
+  if (session?.status === "recording" || session?.status === "paused") {
+    return "Focus: recording in progress. Objective summary will be generated after stop.";
+  }
+  if (session?.status === "stopped") {
+    return hasSummaryAutomation
+      ? "Focus: summary is pending and will be generated automatically."
+      : "Focus: set OpenRouter API key in Settings to enable auto-summary.";
+  }
+  return "Focus: session summary not available yet.";
+}
+
 function formatPercent(value) {
   const num = Number(value);
   if (!Number.isFinite(num) || num <= 0) {
@@ -284,6 +691,14 @@ function formatCurrency(value) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   }).format(num);
+}
+
+function formatUsdPrecise(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 0) {
+    return "$0.0000";
+  }
+  return `$${num.toFixed(4)}`;
 }
 
 function formatDateInputValue(dateLike) {
@@ -753,12 +1168,16 @@ function setCaptureSubView(nextSubView) {
 }
 
 function setDetailSubView(nextSubView) {
-  const valid = ["transcript", "timeline"];
+  const valid = ["transcript", "summary", "timeline"];
   state.detailSubView = valid.includes(nextSubView) ? nextSubView : "transcript";
   const isTranscript = state.detailSubView === "transcript";
+  const isSummary = state.detailSubView === "summary";
   const isTimeline = state.detailSubView === "timeline";
   if (els.detailTranscriptPane) {
     els.detailTranscriptPane.classList.toggle("hidden", !isTranscript);
+  }
+  if (els.detailSummaryPane) {
+    els.detailSummaryPane.classList.toggle("hidden", !isSummary);
   }
   if (els.detailEventsPane) {
     els.detailEventsPane.classList.toggle("hidden", !isTimeline);
@@ -766,6 +1185,10 @@ function setDetailSubView(nextSubView) {
   if (els.detailTabTranscript) {
     els.detailTabTranscript.classList.toggle("active", isTranscript);
     els.detailTabTranscript.setAttribute("aria-selected", isTranscript ? "true" : "false");
+  }
+  if (els.detailTabSummary) {
+    els.detailTabSummary.classList.toggle("active", isSummary);
+    els.detailTabSummary.setAttribute("aria-selected", isSummary ? "true" : "false");
   }
   if (els.detailTabTimeline) {
     els.detailTabTimeline.classList.toggle("active", isTimeline);
@@ -791,6 +1214,31 @@ function setSettingsSubView(nextSubView) {
   els.settingsTabHealth.setAttribute("aria-selected", isHealth ? "true" : "false");
   els.settingsTabDefaults.setAttribute("aria-selected", isDefaults ? "true" : "false");
   els.settingsTabTranscription.setAttribute("aria-selected", isTranscription ? "true" : "false");
+  if (isTranscription) {
+    setTranscriptionSubView(state.transcriptionSubView);
+  }
+}
+
+function setTranscriptionSubView(nextSubView) {
+  const valid = ["providers", "usage"];
+  state.transcriptionSubView = valid.includes(nextSubView) ? nextSubView : "providers";
+  const isProviders = state.transcriptionSubView === "providers";
+  const isUsage = state.transcriptionSubView === "usage";
+
+  if (els.transcriptionProvidersPane) {
+    els.transcriptionProvidersPane.classList.toggle("hidden", !isProviders);
+  }
+  if (els.transcriptionUsagePane) {
+    els.transcriptionUsagePane.classList.toggle("hidden", !isUsage);
+  }
+  if (els.transcriptionTabProviders) {
+    els.transcriptionTabProviders.classList.toggle("active", isProviders);
+    els.transcriptionTabProviders.setAttribute("aria-selected", isProviders ? "true" : "false");
+  }
+  if (els.transcriptionTabUsage) {
+    els.transcriptionTabUsage.classList.toggle("active", isUsage);
+    els.transcriptionTabUsage.setAttribute("aria-selected", isUsage ? "true" : "false");
+  }
 }
 
 function setSourcePickerOpen(isOpen) {
@@ -1003,8 +1451,12 @@ function renderSessions() {
         <span class="session-title">${safeText(session.title)}</span>
         <span class="status-pill">${safeText(session.status)}</span>
       </span>
-      <span class="session-meta session-date">${dateFormatter.format(new Date(session.started_at))}</span>
-      <span class="session-meta session-duration">Duration: ${formatSeconds(getDisplayRecordedSeconds(session))}</span>
+      <span class="session-meta-row">
+        <span class="session-meta session-date">${dateFormatter.format(new Date(session.started_at))}</span>
+        <span class="session-meta-dot">•</span>
+        <span class="session-meta session-duration">Duration ${formatSeconds(getDisplayRecordedSeconds(session))}</span>
+      </span>
+      <span class="session-meta session-preview">${safeText(buildSessionSummaryPreview(session))}</span>
     `;
     card.addEventListener("click", async () => {
       state.selectedSessionId = session.id;
@@ -1392,6 +1844,107 @@ function renderDetailEstimate(chunks) {
   `;
 }
 
+function getSummaryProgressForSession(sessionId) {
+  const progress = state.summaryProgress;
+  if (!progress || !sessionId || progress.sessionId !== sessionId) {
+    return null;
+  }
+  return progress;
+}
+
+function formatSummaryProgressText(progress) {
+  if (!progress) {
+    return "";
+  }
+  const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent || 0))));
+  const message = String(progress.message || "").trim();
+  return message ? `${message} ${percent}/100` : `Regenerating ${percent}/100`;
+}
+
+function formatSummaryProgressButtonText(progress) {
+  const percent = Math.max(0, Math.min(100, Math.round(Number(progress?.percent || 0))));
+  return `Regenerating ${percent}/100`;
+}
+
+function renderDetailSummary(session) {
+  if (!els.detailSummaryPanel || !els.detailSummaryMeta || !els.detailSummaryText) {
+    return;
+  }
+  if (!session) {
+    els.detailSummaryPanel.classList.remove("hidden");
+    els.detailSummaryMeta.textContent = "";
+    els.detailSummaryText.innerHTML =
+      '<p class="summary-empty">Select a session to view summary.</p>';
+    if (els.detailGenerateSummaryBtn) {
+      els.detailGenerateSummaryBtn.disabled = true;
+    }
+    if (els.detailCopySummaryBtn) {
+      els.detailCopySummaryBtn.disabled = true;
+    }
+    return;
+  }
+
+  const stopped = session.status === "stopped";
+  const summary = String(session.summary_text || "").trim();
+  const displaySummary = unwrapMarkdownCodeFence(summary);
+  const model = String(session.summary_model || "").trim();
+  const hasSummaryApiKey = Boolean(String(state.settings?.openrouter_api_key || "").trim());
+  const summaryProgress = getSummaryProgressForSession(session.id);
+  const progressRunning = summaryProgress && summaryProgress.status === "running";
+  const progressError = summaryProgress && summaryProgress.status === "error";
+  const generatedAt = session.summary_generated_at
+    ? dateFormatter.format(new Date(session.summary_generated_at))
+    : "";
+
+  els.detailSummaryPanel.classList.remove("hidden");
+  if (els.detailGenerateSummaryBtn) {
+    const showBusy = state.summaryGenerating || progressRunning;
+    els.detailGenerateSummaryBtn.disabled = !stopped || showBusy || !hasSummaryApiKey;
+    els.detailGenerateSummaryBtn.textContent = showBusy
+      ? formatSummaryProgressButtonText(summaryProgress)
+      : "Regenerate";
+  }
+  if (els.detailCopySummaryBtn) {
+    els.detailCopySummaryBtn.disabled = !summary;
+  }
+
+  if (!stopped) {
+    els.detailSummaryMeta.textContent = "Summary is available after the session is stopped.";
+    els.detailSummaryText.innerHTML =
+      '<p class="summary-empty">Stop the session to generate an AI summary.</p>';
+    return;
+  }
+
+  if (displaySummary) {
+    const parts = [];
+    if (progressRunning) {
+      parts.push(formatSummaryProgressText(summaryProgress));
+    }
+    if (model) {
+      parts.push(`Model: ${model}`);
+    }
+    if (generatedAt) {
+      parts.push(`Generated: ${generatedAt}`);
+    }
+    els.detailSummaryMeta.textContent = parts.join(" | ");
+    els.detailSummaryText.innerHTML = markdownToSafeHtml(displaySummary);
+    return;
+  }
+
+  if (progressRunning) {
+    els.detailSummaryMeta.textContent = formatSummaryProgressText(summaryProgress);
+  } else if (progressError) {
+    els.detailSummaryMeta.textContent = `Last summary attempt failed: ${summaryProgress.message || "Unknown error."}`;
+  } else {
+    els.detailSummaryMeta.textContent = hasSummaryApiKey
+      ? "Summary not available yet."
+      : "OpenRouter API key missing.";
+  }
+  els.detailSummaryText.innerHTML = hasSummaryApiKey
+    ? '<p class="summary-empty">Summary is generated automatically after stop.</p>'
+    : '<p class="summary-empty">Set OpenRouter API key in Settings to enable automatic summaries.</p>';
+}
+
 async function saveSpeakerAlias(sessionId, speakerId, aliasInput, triggerButton, options = {}) {
   const alias = String(aliasInput || "").trim();
   const previousAlias = String(options.previousAlias || "").trim();
@@ -1615,6 +2168,14 @@ function describeTimelineEvent(event) {
       message: count > 0 ? `Source set updated (${count} selected).` : "Source set updated."
     };
   }
+  if (type === "summary_generated") {
+    const model = String(event?.payload?.model || "").trim();
+    return {
+      tag: "event",
+      tagClass: "",
+      message: model ? `Summary generated (${model}).` : "Summary generated."
+    };
+  }
   return {
     tag: "event",
     tagClass: "",
@@ -1642,6 +2203,7 @@ async function renderDetail() {
   els.detailChunks.innerHTML = "";
   els.detailEvents.innerHTML = "";
   els.detailMeta.textContent = "";
+  renderDetailSummary(null);
   if (els.detailSpeakers) {
     els.detailSpeakers.innerHTML = "";
     els.detailSpeakers.classList.add("hidden");
@@ -1670,6 +2232,7 @@ async function renderDetail() {
     return;
   }
   const session = detail.session;
+  renderDetailSummary(session);
   const speakerAliasMap = buildSpeakerAliasMap(detail.events || []);
   const speakerIds = getSpeakerIdsFromChunks(detail.chunks || []);
   renderSpeakerAliasPanel(session.id, speakerIds, speakerAliasMap);
@@ -1737,7 +2300,7 @@ async function renderDetail() {
           <button data-copy-chunk="${safeText(chunk.id)}">Copy</button>
         </div>
       </div>
-      <p class="chunk-text">${safeText(text)}</p>
+      <div class="chunk-text">${buildChunkTextMarkup(text)}</div>
     `;
     const copyBtn = row.querySelector("button[data-copy-chunk]");
     copyBtn.addEventListener("click", async () => {
@@ -1798,6 +2361,12 @@ function renderControls() {
   const selectedActive = Boolean(
     selected && (selected.status === "recording" || selected.status === "paused")
   );
+  const selectedStopped = Boolean(selected && selected.status === "stopped");
+  const selectedSummaryProgress = selected ? getSummaryProgressForSession(selected.id) : null;
+  const summaryBusy = Boolean(
+    state.summaryGenerating ||
+    (selectedSummaryProgress && selectedSummaryProgress.status === "running")
+  );
   const folder = findFolder(state.selectedFolderId);
   const setupSelectedSources = getCheckedSourcesByName("source-check");
   const canTestOneSource = setupSelectedSources.length === 1;
@@ -1811,6 +2380,12 @@ function renderControls() {
   els.applySourcesBtn.disabled = !active;
   els.copyAllBtn.disabled = !selected;
   els.openTranscriptBtn.disabled = !selected;
+  if (els.generateSummaryBtn) {
+    els.generateSummaryBtn.disabled = !selectedStopped || summaryBusy;
+    els.generateSummaryBtn.textContent = summaryBusy
+      ? formatSummaryProgressButtonText(selectedSummaryProgress)
+      : "Regenerate";
+  }
   els.renameSessionBtn.disabled = !selected;
   els.deleteSessionBtn.disabled = !selected || selectedActive;
   els.deleteFolderBtn.disabled = !folder || (folder.sessions || []).length > 0;
@@ -1825,11 +2400,213 @@ function renderLiveDurationTick() {
   renderStatus();
 }
 
+function mergeUniqueModels(models) {
+  const incoming = Array.isArray(models) ? models : [];
+  const seed = incoming.length > 0 ? incoming : FREE_OPENROUTER_MODELS;
+  const unique = [];
+  for (const raw of seed) {
+    const value = String(raw || "").trim();
+    if (!value || unique.includes(value)) {
+      continue;
+    }
+    unique.push(value);
+  }
+  return unique;
+}
+
+function mergeUniqueDeepgramModels(models) {
+  const seed = [...DEFAULT_DEEPGRAM_MODELS, ...(models || [])];
+  const unique = [];
+  for (const raw of seed) {
+    const value = String(raw || "").trim();
+    if (!value || unique.includes(value)) {
+      continue;
+    }
+    unique.push(value);
+  }
+  return unique;
+}
+
+function getSuggestedDeepgramRate(model) {
+  const value = String(model || "").toLowerCase().trim();
+  if (!value) {
+    return 0.0043;
+  }
+  if (value.includes("nova-3")) {
+    return 0.0043;
+  }
+  if (value.includes("nova-2")) {
+    return 0.0043;
+  }
+  if (value.includes("enhanced")) {
+    return 0.0145;
+  }
+  if (value.includes("base")) {
+    return 0.0125;
+  }
+  if (value.includes("whisper")) {
+    return 0.0048;
+  }
+  return 0.0043;
+}
+
+function ensureDeepgramModelOptions(configuredModel = "") {
+  if (!els.deepgramModel) {
+    return;
+  }
+  const knownModels = mergeUniqueDeepgramModels(state.deepgramModels);
+  const current = String(els.deepgramModel.value || "").trim();
+  const preferred = String(configuredModel || "").trim() || current || "nova-3";
+  els.deepgramModel.innerHTML = "";
+  for (const modelId of knownModels) {
+    const option = document.createElement("option");
+    option.value = modelId;
+    option.textContent = modelId;
+    els.deepgramModel.appendChild(option);
+  }
+  if (!knownModels.includes(preferred)) {
+    const option = document.createElement("option");
+    option.value = preferred;
+    option.textContent = `${preferred} (Saved)`;
+    els.deepgramModel.appendChild(option);
+  }
+  els.deepgramModel.value = preferred;
+}
+
+function getAvailableOpenRouterModels() {
+  return mergeUniqueModels(state.openRouterModels);
+}
+
+function refreshDeepgramModelsStatusLabel() {
+  if (!els.deepgramModelsStatus) {
+    return;
+  }
+  const status = String(state.deepgramModelsStatus || "").trim();
+  if (status) {
+    els.deepgramModelsStatus.textContent = status;
+    return;
+  }
+  els.deepgramModelsStatus.textContent = "Sync available STT models from Deepgram.";
+}
+
+function renderEstimatedRateHint() {
+  if (!els.estimatedSttHint || !els.deepgramModel) {
+    return;
+  }
+  const model = String(els.deepgramModel.value || "nova-3").trim();
+  const suggested = getSuggestedDeepgramRate(model);
+  state.deepgramRateSuggestion = suggested;
+  els.estimatedSttHint.textContent =
+    `Suggested for ${model}: ${formatUsdPrecise(suggested)} / min (editable).`;
+}
+
+function refreshOpenRouterModelsStatusLabel() {
+  if (!els.openRouterModelsStatus) {
+    return;
+  }
+  const status = String(state.openRouterModelsStatus || "").trim();
+  if (status) {
+    els.openRouterModelsStatus.textContent = status;
+    return;
+  }
+  els.openRouterModelsStatus.textContent =
+    "Sync all currently free models from OpenRouter API.";
+}
+
+function ensureOpenRouterModelOptions(configuredModel = "") {
+  if (!els.openrouterModel) {
+    return;
+  }
+  const currentValue = String(els.openrouterModel.value || "").trim();
+  const requested = String(configuredModel || "").trim();
+  const knownModels = getAvailableOpenRouterModels();
+  const preferred = requested || currentValue || DEFAULT_SUMMARY_MODEL;
+  const nextValue = knownModels.includes(preferred) ? preferred : "__custom__";
+
+  els.openrouterModel.innerHTML = "";
+  for (const modelId of knownModels) {
+    const option = document.createElement("option");
+    option.value = modelId;
+    option.textContent =
+      modelId === DEFAULT_SUMMARY_MODEL
+        ? `${modelId} (Recommended)`
+        : modelId === "openrouter/free"
+          ? `${modelId} (Router)`
+          : modelId;
+    els.openrouterModel.appendChild(option);
+  }
+  const customOption = document.createElement("option");
+  customOption.value = "__custom__";
+  customOption.textContent = "Custom model...";
+  els.openrouterModel.appendChild(customOption);
+  els.openrouterModel.value = nextValue;
+}
+
+function setOpenRouterModelControl(configuredModel) {
+  if (!els.openrouterModel) {
+    return;
+  }
+  ensureOpenRouterModelOptions(configuredModel);
+  const normalized = String(configuredModel || "").trim();
+  const effectiveModel = normalized || DEFAULT_SUMMARY_MODEL;
+  const isKnown = getAvailableOpenRouterModels().includes(effectiveModel);
+  els.openrouterModel.value = isKnown ? effectiveModel : "__custom__";
+  if (!els.openrouterModelCustom) {
+    return;
+  }
+  els.openrouterModelCustom.classList.toggle("hidden", isKnown);
+  if (!isKnown) {
+    els.openrouterModelCustom.value = effectiveModel;
+  } else if (!els.openrouterModelCustom.matches(":focus")) {
+    els.openrouterModelCustom.value = "";
+  }
+}
+
+function getSelectedOpenRouterModel() {
+  if (!els.openrouterModel) {
+    return DEFAULT_SUMMARY_MODEL;
+  }
+  const selected = String(els.openrouterModel.value || "").trim();
+  if (selected !== "__custom__") {
+    return selected || DEFAULT_SUMMARY_MODEL;
+  }
+  const custom = String(els.openrouterModelCustom?.value || "").trim();
+  return custom || DEFAULT_SUMMARY_MODEL;
+}
+
 function renderSettings() {
   const settings = state.settings || {};
   els.deepgramApiKey.value = settings.deepgram_api_key || "";
   els.deepgramProjectId.value = settings.deepgram_project_id || "";
-  els.deepgramModel.value = settings.deepgram_model || "nova-3";
+  ensureDeepgramModelOptions(settings.deepgram_model || "nova-3");
+  if (els.refreshDeepgramModelsBtn) {
+    els.refreshDeepgramModelsBtn.disabled = state.deepgramModelsLoading;
+    els.refreshDeepgramModelsBtn.textContent = state.deepgramModelsLoading
+      ? "Syncing..."
+      : "Sync Models";
+  }
+  refreshDeepgramModelsStatusLabel();
+  renderEstimatedRateHint();
+  els.openrouterApiKey.value = settings.openrouter_api_key || "";
+  const configuredModel = String(settings.openrouter_model || "").trim();
+  setOpenRouterModelControl(
+    !configuredModel
+      ? DEFAULT_SUMMARY_MODEL
+      : configuredModel
+  );
+  if (els.refreshOpenRouterModelsBtn) {
+    els.refreshOpenRouterModelsBtn.disabled = state.openRouterModelsLoading;
+    els.refreshOpenRouterModelsBtn.textContent = state.openRouterModelsLoading
+      ? "Syncing..."
+      : "Sync Free Models";
+  }
+  refreshOpenRouterModelsStatusLabel();
+  if (els.refreshOpenRouterUsageBtn) {
+    els.refreshOpenRouterUsageBtn.disabled = state.openRouterUsageLoading;
+    els.refreshOpenRouterUsageBtn.textContent = state.openRouterUsageLoading
+      ? "Loading..."
+      : "Refresh OpenRouter";
+  }
   els.preprocessProfile.value = settings.transcription_preprocess_profile || "fast";
   els.preprocessTimeoutMs.value = String(settings.transcription_preprocess_timeout_ms || 5000);
   els.estimatedSttUsdPerMin.value = String(
@@ -1837,6 +2614,7 @@ function renderSettings() {
       ? Number(settings.estimated_stt_usd_per_min)
       : 0.0043
   );
+  renderOpenRouterUsage();
   els.chunkSeconds.value = String(settings.chunk_seconds || 120);
   els.chunkSecondsSettings.value = String(settings.chunk_seconds || 120);
   if (!els.usageStartDate.value || !els.usageEndDate.value) {
@@ -1861,7 +2639,7 @@ function renderUsageBreakdown() {
   }
   const usage = state.usageBreakdown;
   if (!usage) {
-    els.usageSummary.innerHTML = '<div class="muted">Usage not loaded yet. Click "Refresh Usage".</div>';
+    els.usageSummary.innerHTML = '<div class="muted">Usage not loaded yet. Click "Refresh Deepgram".</div>';
     els.usageList.innerHTML = "";
     return;
   }
@@ -1920,6 +2698,85 @@ function renderUsageBreakdown() {
   els.usageList.innerHTML = items.join("");
 }
 
+function renderOpenRouterUsage() {
+  if (!els.openRouterUsageSummary || !els.openRouterUsageList) {
+    return;
+  }
+  const hasKey = Boolean(String(state.settings?.openrouter_api_key || "").trim());
+  if (!hasKey) {
+    els.openRouterUsageSummary.innerHTML =
+      '<div class="muted">Add OpenRouter API key to load usage.</div>';
+    els.openRouterUsageList.innerHTML = "";
+    return;
+  }
+  if (state.openRouterUsageLoading) {
+    els.openRouterUsageSummary.innerHTML =
+      '<div class="muted">Loading OpenRouter usage...</div>';
+    return;
+  }
+  if (state.openRouterUsageError) {
+    els.openRouterUsageSummary.innerHTML = `<div class="muted">${safeText(state.openRouterUsageError)}</div>`;
+    els.openRouterUsageList.innerHTML = "";
+    return;
+  }
+  const keyInfo = state.openRouterUsage;
+  if (!keyInfo) {
+    els.openRouterUsageSummary.innerHTML =
+      '<div class="muted">Usage not loaded yet. Click "Refresh OpenRouter".</div>';
+    els.openRouterUsageList.innerHTML = "";
+    return;
+  }
+
+  const limit = Number(keyInfo.limit);
+  const usage = Number(keyInfo.usage);
+  const remaining = Number(keyInfo.limit_remaining);
+  const limitText = Number.isFinite(limit) ? formatCurrency(limit) : "No limit";
+  const usageText = Number.isFinite(usage) ? formatCurrency(usage) : "--";
+  const remainingText = Number.isFinite(remaining) ? formatCurrency(remaining) : "--";
+  const rateLimit = keyInfo.rate_limit || {};
+  const requestsPerMin = Number(rateLimit.requests || 0);
+  const intervalLabel = String(rateLimit.interval || "").trim();
+  const updatedAt = keyInfo.fetched_at
+    ? dateFormatter.format(new Date(keyInfo.fetched_at))
+    : "";
+
+  els.openRouterUsageSummary.innerHTML = `
+    <div class="usage-pill"><span>Credit Limit</span><strong>${safeText(limitText)}</strong></div>
+    <div class="usage-pill"><span>Used</span><strong>${safeText(usageText)}</strong></div>
+    <div class="usage-pill"><span>Remaining</span><strong>${safeText(remainingText)}</strong></div>
+    <div class="usage-pill"><span>Key Tier</span><strong>${keyInfo.is_free_tier ? "Free" : "Paid/Custom"}</strong></div>
+  `;
+
+  const rows = [];
+  if (keyInfo.label) {
+    rows.push({ label: "Key label", value: keyInfo.label });
+  }
+  if (requestsPerMin > 0) {
+    rows.push({
+      label: "Rate limit",
+      value: `${requestsPerMin} requests / ${intervalLabel || "minute"}`
+    });
+  }
+  if (updatedAt) {
+    rows.push({ label: "Last refreshed", value: updatedAt });
+  }
+  rows.push({
+    label: "Usage scope",
+    value: "Summary generation requests via OpenRouter"
+  });
+
+  els.openRouterUsageList.innerHTML = rows
+    .map(
+      (row) => `
+      <div class="usage-row openrouter-usage-row">
+        <span class="usage-row-label">${safeText(row.label)}</span>
+        <span class="usage-row-metric">${safeText(row.value)}</span>
+      </div>
+    `
+    )
+    .join("");
+}
+
 function renderSessionFilters() {
   els.sessionsSearch.value = state.sessionSearch;
   els.sessionsStatusFilter.value = state.sessionStatusFilter;
@@ -1935,6 +2792,7 @@ function renderAll() {
   setCaptureSubView(state.captureSubView);
   setDetailSubView(state.detailSubView);
   setSettingsSubView(state.settingsSubView);
+  setTranscriptionSubView(state.transcriptionSubView);
   renderWorkspaceHeader();
   renderStatus();
   renderHealth();
@@ -2067,6 +2925,60 @@ async function copyAllTranscript() {
   showToast("Transcript copied.");
 }
 
+async function generateSummaryForSelectedSession() {
+  const session = state.selectedSessionId ? findSession(state.selectedSessionId) : null;
+  if (!session) {
+    return;
+  }
+  if (session.status !== "stopped") {
+    showToast("Summary can be generated only after the session is stopped.", true);
+    return;
+  }
+  state.summaryGenerating = true;
+  state.summaryProgress = {
+    sessionId: session.id,
+    status: "running",
+    percent: 0,
+    message: "Queued...",
+    at: new Date().toISOString()
+  };
+  renderControls();
+  renderDetailSummary(session);
+  try {
+    await window.clipscribe.generateSessionSummary(session.id);
+    await refreshGlobal();
+    showToast("Summary generated.");
+  } catch (error) {
+    state.summaryProgress = {
+      sessionId: session.id,
+      status: "error",
+      percent: 100,
+      message: friendlyError(error),
+      at: new Date().toISOString()
+    };
+    showToast(friendlyError(error), true);
+  } finally {
+    state.summaryGenerating = false;
+    renderControls();
+    const latest = state.selectedSessionId ? findSession(state.selectedSessionId) : null;
+    renderDetailSummary(latest);
+  }
+}
+
+async function copySessionSummary() {
+  const session = state.selectedSessionId ? findSession(state.selectedSessionId) : null;
+  if (!session) {
+    return;
+  }
+  const summary = unwrapMarkdownCodeFence(String(session.summary_text || "").trim());
+  if (!summary) {
+    showToast("No summary available yet.", true);
+    return;
+  }
+  await navigator.clipboard.writeText(summary);
+  showToast("Summary copied.");
+}
+
 async function renameSelectedSession() {
   const session = state.selectedSessionId ? findSession(state.selectedSessionId) : null;
   if (!session) {
@@ -2176,7 +3088,12 @@ async function stopActive() {
     await window.clipscribe.stopSession(active.id);
     state.selectedSessionId = active.id;
     await refreshGlobal();
-    showToast("Stopped.");
+    const hasSummaryAutomation = Boolean(String(state.settings?.openrouter_api_key || "").trim());
+    showToast(
+      hasSummaryAutomation
+        ? "Stopped. Summary is generating in background."
+        : "Stopped."
+    );
   } catch (error) {
     showToast(friendlyError(error), true);
   }
@@ -2255,10 +3172,13 @@ async function refreshSources() {
 
 async function saveSettings() {
   try {
+    const selectedOpenRouterModel = getSelectedOpenRouterModel();
     state.settings = await window.clipscribe.updateSettings({
       deepgram_api_key: els.deepgramApiKey.value.trim(),
       deepgram_project_id: els.deepgramProjectId.value.trim(),
       deepgram_model: els.deepgramModel.value,
+      openrouter_api_key: els.openrouterApiKey.value.trim(),
+      openrouter_model: selectedOpenRouterModel,
       transcription_preprocess_profile: els.preprocessProfile.value,
       transcription_preprocess_timeout_ms: Number.parseInt(els.preprocessTimeoutMs.value, 10),
       estimated_stt_usd_per_min: Number.parseFloat(els.estimatedSttUsdPerMin.value),
@@ -2267,9 +3187,131 @@ async function saveSettings() {
     els.chunkSeconds.value = String(state.settings.chunk_seconds || 120);
     renderSettings();
     renderHealth();
+    void refreshOpenRouterUsage({ silent: true });
     showToast("Settings saved.");
   } catch (error) {
     showToast(friendlyError(error), true);
+  }
+}
+
+async function refreshOpenRouterModels({ silent = false } = {}) {
+  if (!window.clipscribe.listOpenRouterFreeModels) {
+    return;
+  }
+  if (state.openRouterModelsLoading) {
+    return;
+  }
+  state.openRouterModelsLoading = true;
+  state.openRouterModelsStatus = "Syncing free models...";
+  renderSettings();
+  try {
+    const payload = await window.clipscribe.listOpenRouterFreeModels();
+    const fetchedModels = Array.isArray(payload?.models) ? payload.models : [];
+    if (fetchedModels.length > 0) {
+      state.openRouterModels = mergeUniqueModels(fetchedModels);
+    } else {
+      state.openRouterModels = mergeUniqueModels([]);
+    }
+    const stamp = payload?.fetched_at ? dateFormatter.format(new Date(payload.fetched_at)) : "";
+    state.openRouterModelsStatus = stamp
+      ? `${state.openRouterModels.length} API free models synced | Updated ${stamp}`
+      : `${state.openRouterModels.length} API free models synced.`;
+    renderSettings();
+    if (!silent) {
+      showToast("Free models synced.");
+    }
+  } catch (error) {
+    state.openRouterModels = mergeUniqueModels(state.openRouterModels);
+    state.openRouterModelsStatus =
+      "Sync failed. Showing cached model list.";
+    renderSettings();
+    if (!silent) {
+      showToast(friendlyError(error), true);
+    }
+  } finally {
+    state.openRouterModelsLoading = false;
+    renderSettings();
+  }
+}
+
+async function refreshDeepgramModels({ silent = false } = {}) {
+  if (!window.clipscribe.listDeepgramModels) {
+    return;
+  }
+  if (state.deepgramModelsLoading) {
+    return;
+  }
+  state.deepgramModelsLoading = true;
+  state.deepgramModelsStatus = "Syncing Deepgram models...";
+  renderSettings();
+  try {
+    const payload = await window.clipscribe.listDeepgramModels();
+    const models = Array.isArray(payload?.models) ? payload.models : [];
+    state.deepgramModels = mergeUniqueDeepgramModels(models);
+    const stamp = payload?.fetched_at ? dateFormatter.format(new Date(payload.fetched_at)) : "";
+    state.deepgramModelsStatus = stamp
+      ? `${state.deepgramModels.length} models synced | Updated ${stamp}`
+      : `${state.deepgramModels.length} models synced.`;
+    ensureDeepgramModelOptions(els.deepgramModel?.value || state.settings?.deepgram_model || "nova-3");
+    renderEstimatedRateHint();
+    if (!silent) {
+      showToast("Deepgram models synced.");
+    }
+  } catch (error) {
+    state.deepgramModelsStatus = "Sync failed. Showing cached model list.";
+    if (!silent) {
+      showToast(friendlyError(error), true);
+    }
+  } finally {
+    state.deepgramModelsLoading = false;
+    renderSettings();
+  }
+}
+
+async function refreshOpenRouterUsage({ silent = false } = {}) {
+  if (!window.clipscribe.getOpenRouterKeyInfo) {
+    return;
+  }
+  if (state.openRouterUsageLoading) {
+    return;
+  }
+  const hasKey = Boolean(String(state.settings?.openrouter_api_key || "").trim());
+  if (!hasKey) {
+    state.openRouterUsage = null;
+    state.openRouterUsageError = "OpenRouter API key is missing.";
+    renderOpenRouterUsage();
+    return;
+  }
+  state.openRouterUsageLoading = true;
+  state.openRouterUsageError = "";
+  renderSettings();
+  try {
+    const payload = await window.clipscribe.getOpenRouterKeyInfo();
+    if (!payload || payload.ok === false) {
+      state.openRouterUsage = null;
+      state.openRouterUsageError = payload?.message || "Unable to load OpenRouter usage.";
+      if (!silent) {
+        showToast(state.openRouterUsageError, true);
+      }
+      return;
+    }
+    state.openRouterUsage = {
+      ...(payload.key || {}),
+      fetched_at: new Date().toISOString()
+    };
+    state.openRouterUsageError = "";
+    if (!silent) {
+      showToast("OpenRouter usage updated.");
+    }
+  } catch (error) {
+    state.openRouterUsage = null;
+    state.openRouterUsageError = friendlyError(error);
+    if (!silent) {
+      showToast(state.openRouterUsageError, true);
+    }
+  } finally {
+    state.openRouterUsageLoading = false;
+    renderSettings();
   }
 }
 
@@ -2317,7 +3359,7 @@ async function refreshUsageBreakdown() {
     state.usageLoading = false;
     if (els.refreshUsageBtn) {
       els.refreshUsageBtn.disabled = false;
-      els.refreshUsageBtn.textContent = "Refresh Usage";
+      els.refreshUsageBtn.textContent = "Refresh Deepgram";
     }
   }
 }
@@ -2417,6 +3459,9 @@ function wireEvents() {
   if (els.detailTabTranscript) {
     els.detailTabTranscript.addEventListener("click", () => setDetailSubView("transcript"));
   }
+  if (els.detailTabSummary) {
+    els.detailTabSummary.addEventListener("click", () => setDetailSubView("summary"));
+  }
   if (els.detailTabTimeline) {
     els.detailTabTimeline.addEventListener("click", () => setDetailSubView("timeline"));
   }
@@ -2424,6 +3469,12 @@ function wireEvents() {
   els.settingsTabHealth.addEventListener("click", () => setSettingsSubView("health"));
   els.settingsTabDefaults.addEventListener("click", () => setSettingsSubView("defaults"));
   els.settingsTabTranscription.addEventListener("click", () => setSettingsSubView("transcription"));
+  if (els.transcriptionTabProviders) {
+    els.transcriptionTabProviders.addEventListener("click", () => setTranscriptionSubView("providers"));
+  }
+  if (els.transcriptionTabUsage) {
+    els.transcriptionTabUsage.addEventListener("click", () => setTranscriptionSubView("usage"));
+  }
 
   els.sourcePickerToggle.addEventListener("click", () => {
     setSourcePickerOpen(!state.sourcePickerOpen);
@@ -2449,12 +3500,64 @@ function wireEvents() {
   els.applySourcesBtn.addEventListener("click", applySourceChange);
   els.copyAllBtn.addEventListener("click", copyAllTranscript);
   els.openTranscriptBtn.addEventListener("click", openSelectedTranscript);
+  if (els.generateSummaryBtn) {
+    els.generateSummaryBtn.addEventListener("click", generateSummaryForSelectedSession);
+  }
+  if (els.detailGenerateSummaryBtn) {
+    els.detailGenerateSummaryBtn.addEventListener("click", generateSummaryForSelectedSession);
+  }
+  if (els.detailCopySummaryBtn) {
+    els.detailCopySummaryBtn.addEventListener("click", copySessionSummary);
+  }
   els.renameSessionBtn.addEventListener("click", renameSelectedSession);
   els.deleteSessionBtn.addEventListener("click", deleteSelectedSession);
   els.newFolderBtn.addEventListener("click", createFolder);
   els.deleteFolderBtn.addEventListener("click", deleteSelectedFolder);
   els.refreshSourcesBtn.addEventListener("click", refreshSources);
   els.saveSettingsBtn.addEventListener("click", saveSettings);
+  if (els.refreshDeepgramModelsBtn) {
+    els.refreshDeepgramModelsBtn.addEventListener("click", () => {
+      void refreshDeepgramModels();
+    });
+  }
+  if (els.deepgramModel) {
+    els.deepgramModel.addEventListener("change", () => {
+      const prev = Number(state.deepgramRateSuggestion || 0);
+      const current = Number(els.estimatedSttUsdPerMin.value || 0);
+      const next = Number(getSuggestedDeepgramRate(els.deepgramModel.value));
+      const shouldAutoApply =
+        !Number.isFinite(current) ||
+        current <= 0 ||
+        Math.abs(current - prev) < 0.000001;
+      if (shouldAutoApply) {
+        els.estimatedSttUsdPerMin.value = String(next);
+      }
+      renderEstimatedRateHint();
+    });
+  }
+  if (els.refreshOpenRouterModelsBtn) {
+    els.refreshOpenRouterModelsBtn.addEventListener("click", () => {
+      void refreshOpenRouterModels();
+    });
+  }
+  if (els.refreshOpenRouterUsageBtn) {
+    els.refreshOpenRouterUsageBtn.addEventListener("click", () => {
+      void refreshOpenRouterUsage();
+    });
+  }
+  if (els.openrouterModel) {
+    els.openrouterModel.addEventListener("change", () => {
+      const selected = String(els.openrouterModel.value || "").trim();
+      if (!els.openrouterModelCustom) {
+        return;
+      }
+      const showCustom = selected === "__custom__";
+      els.openrouterModelCustom.classList.toggle("hidden", !showCustom);
+      if (showCustom && !els.openrouterModelCustom.value.trim()) {
+        els.openrouterModelCustom.value = DEFAULT_SUMMARY_MODEL;
+      }
+    });
+  }
   els.refreshUsageBtn.addEventListener("click", refreshUsageBreakdown);
   els.saveDefaultSourcesBtn.addEventListener("click", saveDefaultSources);
   els.detectFfmpegBtn.addEventListener("click", autoDetectFfmpeg);
@@ -2543,12 +3646,38 @@ function wireEvents() {
   window.clipscribe.onSessionUpdated(({ sessionId }) => {
     scheduleSessionRefresh(sessionId);
   });
+  if (window.clipscribe.onSummaryProgress) {
+    window.clipscribe.onSummaryProgress((payload) => {
+      const sessionId = String(payload?.sessionId || "").trim();
+      if (!sessionId) {
+        return;
+      }
+      state.summaryProgress = {
+        sessionId,
+        status: String(payload?.status || "running").trim() || "running",
+        percent: Number(payload?.percent || 0),
+        message: String(payload?.message || "").trim(),
+        at: String(payload?.at || "").trim()
+      };
+      if (state.summaryProgress.status === "done" || state.summaryProgress.status === "error") {
+        state.summaryGenerating = false;
+      }
+      renderControls();
+      if (state.selectedSessionId === sessionId) {
+        const session = findSession(sessionId);
+        renderDetailSummary(session);
+      }
+    });
+  }
 }
 
 async function init() {
   wireEvents();
   setSourcePickerOpen(false);
   await refreshGlobal();
+  void refreshOpenRouterModels({ silent: true });
+  void refreshDeepgramModels({ silent: true });
+  void refreshOpenRouterUsage({ silent: true });
   if ((state.sources || []).length === 0) {
     await refreshSources();
   }
@@ -2562,3 +3691,4 @@ async function init() {
 init().catch((error) => {
   showToast(friendlyError(error), true);
 });
+

@@ -165,7 +165,7 @@
           <section id="capture-transcript-panel" class="capture-pane hidden">
             <section class="panel detail-panel">
               <div class="panel-title-row">
-                <h3>Transcript Timeline</h3>
+                <h3>Transcript</h3>
                 <div class="detail-head-actions">
                   <button id="copy-all-btn">Copy Transcript</button>
                   <div id="detail-meta" class="muted"></div>
@@ -181,31 +181,54 @@
               <div id="detail-speakers" class="speaker-alias-panel hidden"></div>
               <nav class="detail-subtabs" role="tablist" aria-label="Transcript Detail Views">
                 <button
-                  id="detail-tab-transcript"
+                  id="detail-tab-timeline"
                   class="detail-subtab active"
                   role="tab"
                   aria-selected="true"
-                  aria-controls="detail-transcript-pane"
-                  type="button"
-                >
-                  Transcript
-                </button>
-                <button
-                  id="detail-tab-timeline"
-                  class="detail-subtab"
-                  role="tab"
-                  aria-selected="false"
                   aria-controls="detail-events-pane"
                   type="button"
                 >
                   <span class="detail-subtab-label">Timeline</span>
                   <span id="detail-tab-timeline-count" class="detail-tab-count hidden">0</span>
                 </button>
+                <button
+                  id="detail-tab-summary"
+                  class="detail-subtab"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="detail-summary-pane"
+                  type="button"
+                >
+                  Summary
+                </button>
+                <button
+                  id="detail-tab-transcript"
+                  class="detail-subtab"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="detail-transcript-pane"
+                  type="button"
+                >
+                  Transcript
+                </button>
               </nav>
-              <section id="detail-transcript-pane" class="detail-pane">
+              <section id="detail-transcript-pane" class="detail-pane hidden">
                 <div id="detail-chunks" class="chunks-list"></div>
               </section>
-              <section id="detail-events-pane" class="detail-pane hidden">
+              <section id="detail-summary-pane" class="detail-pane hidden">
+                <section id="detail-summary-panel" class="summary-panel">
+                  <div class="panel-title-row">
+                    <h4>Session Summary</h4>
+                    <div class="actions compact-actions">
+                      <button id="detail-generate-summary-btn">Regenerate</button>
+                      <button id="detail-copy-summary-btn">Copy Summary</button>
+                    </div>
+                  </div>
+                  <p id="detail-summary-meta" class="muted"></p>
+                  <div id="detail-summary-text" class="summary-text"></div>
+                </section>
+              </section>
+              <section id="detail-events-pane" class="detail-pane">
                 <div id="detail-events" class="events-list timeline-list"></div>
               </section>
             </section>
@@ -264,86 +287,183 @@
               <div class="panel-title-row">
                 <h3>Transcription Settings</h3>
               </div>
-              <div class="grid-row">
-                <label>
-                  Deepgram Project ID (Optional)
-                  <input id="deepgram-project-id" name="deepgram_project_id" type="text" autocomplete="off" spellcheck="false" placeholder="project_uuid" />
-                </label>
-                <label>
-                  Model
-                  <select id="deepgram-model" name="deepgram_model">
-                    <option value="nova-3">nova-3</option>
-                    <option value="nova-2">nova-2</option>
-                  </select>
-                </label>
-              </div>
-              <div class="grid-row">
-                <label>
-                  Deepgram API Key
-                  <input id="deepgram-api-key" name="deepgram_api_key" type="password" autocomplete="off" spellcheck="false" placeholder="dg_xxx..." />
-                </label>
-                <label>
-                  Chunk Interval (Sec)
-                  <input id="chunk-seconds-settings" name="chunk_seconds_settings" type="number" min="30" step="30" />
-                </label>
-              </div>
-              <div class="grid-row">
-                <label>
-                  Enhancement Profile
-                  <select id="preprocess-profile" name="preprocess_profile">
-                    <option value="fast">fast</option>
-                    <option value="denoise">denoise</option>
-                    <option value="off">off</option>
-                  </select>
-                </label>
-                <label>
-                  Max Preprocess Ms
-                  <input id="preprocess-timeout-ms" name="preprocess_timeout_ms" type="number" min="1000" max="20000" step="500" />
-                </label>
-              </div>
-              <div class="grid-row">
-                <label>
-                  Estimated STT USD / Minute
-                  <input id="estimated-stt-usd-per-min" name="estimated_stt_usd_per_min" type="number" min="0" max="10" step="0.0001" />
-                </label>
-              </div>
-              <div class="actions">
-                <button id="save-settings-btn">Save Transcription Settings</button>
-              </div>
-              <div class="usage-breakdown-panel">
-                <div class="panel-title-row">
-                  <h4>Deepgram Usage Breakdown</h4>
-                  <button id="refresh-usage-btn" type="button">Refresh Usage</button>
+              <p class="panel-intro">
+                Configure pre-recorded STT and summary defaults. ClipScribe uses batch transcription (not realtime streaming).
+              </p>
+              <nav class="transcription-subtabs" role="tablist" aria-label="Transcription Sections">
+                <button
+                  id="transcription-tab-providers"
+                  class="transcription-subtab active"
+                  role="tab"
+                  aria-selected="true"
+                  aria-controls="transcription-providers-pane"
+                  type="button"
+                >
+                  Providers
+                </button>
+                <button
+                  id="transcription-tab-usage"
+                  class="transcription-subtab"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="transcription-usage-pane"
+                  type="button"
+                >
+                  Usage
+                </button>
+              </nav>
+
+              <section id="transcription-providers-pane" class="transcription-pane">
+                <div class="transcription-form-grid">
+                  <section class="transcription-card">
+                    <div class="panel-title-row">
+                      <h4>Deepgram (STT)</h4>
+                    </div>
+                    <div class="grid-row">
+                      <label>
+                        Deepgram Project ID (Optional)
+                        <input id="deepgram-project-id" name="deepgram_project_id" type="text" autocomplete="off" spellcheck="false" placeholder="project_uuid" />
+                      </label>
+                      <label>
+                        Model
+                        <div class="model-picker-row">
+                          <select id="deepgram-model" name="deepgram_model">
+                            <option value="nova-3">nova-3</option>
+                            <option value="nova-2">nova-2</option>
+                          </select>
+                          <button id="refresh-deepgram-models-btn" type="button">Sync Models</button>
+                        </div>
+                        <span id="deepgram-models-status" class="muted model-picker-status"></span>
+                      </label>
+                    </div>
+                    <label>
+                      Deepgram API Key
+                      <input id="deepgram-api-key" name="deepgram_api_key" type="password" autocomplete="off" spellcheck="false" placeholder="dg_xxx..." />
+                    </label>
+                  </section>
+
+                  <section class="transcription-card">
+                    <div class="panel-title-row">
+                      <h4>OpenRouter (Summary)</h4>
+                    </div>
+                    <div class="grid-row">
+                      <label>
+                        OpenRouter API Key
+                        <input id="openrouter-api-key" name="openrouter_api_key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-or-v1-..." />
+                      </label>
+                      <label>
+                        OpenRouter Model
+                        <div class="model-picker-row">
+                          <select id="openrouter-model" name="openrouter_model">
+                            <option value="openrouter/free">openrouter/free (Recommended Router)</option>
+                            <option value="meta-llama/llama-3.1-70b-instruct:free">meta-llama/llama-3.1-70b-instruct:free</option>
+                            <option value="mistralai/mistral-small-3.1-24b-instruct:free">mistralai/mistral-small-3.1-24b-instruct:free</option>
+                            <option value="google/gemma-3-27b-it:free">google/gemma-3-27b-it:free</option>
+                            <option value="google/gemma-3-12b-it:free">google/gemma-3-12b-it:free</option>
+                            <option value="qwen/qwen-2.5-72b-instruct:free">qwen/qwen-2.5-72b-instruct:free</option>
+                            <option value="__custom__">Custom model...</option>
+                          </select>
+                          <button id="refresh-openrouter-models-btn" type="button">Sync Free Models</button>
+                        </div>
+                        <input
+                          id="openrouter-model-custom"
+                          name="openrouter_model_custom"
+                          class="hidden"
+                          type="text"
+                          autocomplete="off"
+                          spellcheck="false"
+                          placeholder="openai/gpt-5-mini"
+                        />
+                        <span id="openrouter-models-status" class="muted model-picker-status"></span>
+                      </label>
+                    </div>
+                  </section>
+
+                  <section class="transcription-card">
+                    <div class="panel-title-row">
+                      <h4>Processing And Cost</h4>
+                    </div>
+                    <div class="grid-row">
+                      <label>
+                        Chunk Interval (Sec)
+                        <input id="chunk-seconds-settings" name="chunk_seconds_settings" type="number" min="30" step="30" />
+                      </label>
+                      <label>
+                        Enhancement Profile
+                        <select id="preprocess-profile" name="preprocess_profile">
+                          <option value="fast">fast</option>
+                          <option value="denoise">denoise</option>
+                          <option value="off">off</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div class="grid-row">
+                      <label>
+                        Max Preprocess Ms
+                        <input id="preprocess-timeout-ms" name="preprocess_timeout_ms" type="number" min="1000" max="20000" step="500" />
+                      </label>
+                      <label>
+                        Estimated STT USD / Minute
+                        <input id="estimated-stt-usd-per-min" name="estimated_stt_usd_per_min" type="number" min="0" max="10" step="0.0001" />
+                        <span id="estimated-stt-hint" class="muted model-picker-status"></span>
+                      </label>
+                    </div>
+                  </section>
                 </div>
-                <p class="panel-intro">
-                  Endpoint: <code>listen</code>. Optional grouping by model/method/tag/deployment/accessor/endpoint.
-                </p>
-                <div class="usage-filter-row">
-                  <label>
-                    Start Date
-                    <input id="usage-start-date" type="date" />
-                  </label>
-                  <label>
-                    End Date
-                    <input id="usage-end-date" type="date" />
-                  </label>
-                  <label>
-                    Grouping
-                    <select id="usage-grouping">
-                      <option value="">none</option>
-                      <option value="models">model</option>
-                      <option value="method">method</option>
-                      <option value="tags">tag</option>
-                      <option value="feature_set">feature set</option>
-                      <option value="deployment">deployment</option>
-                      <option value="accessor">accessor</option>
-                      <option value="endpoint">endpoint</option>
-                    </select>
-                  </label>
+                <div class="actions transcription-save-row">
+                  <button id="save-settings-btn">Save Transcription Settings</button>
                 </div>
-                <div id="usage-summary" class="usage-summary"></div>
-                <div id="usage-list" class="usage-list"></div>
-              </div>
+              </section>
+
+              <section id="transcription-usage-pane" class="transcription-pane hidden">
+                <div class="transcription-usage-grid">
+                  <div class="usage-breakdown-panel">
+                    <div class="panel-title-row">
+                      <h4>Deepgram Usage Breakdown</h4>
+                      <button id="refresh-usage-btn" type="button">Refresh Deepgram</button>
+                    </div>
+                    <p class="panel-intro">
+                      Endpoint: <code>listen</code>. Optional grouping by model/method/tag/deployment/accessor/endpoint.
+                    </p>
+                    <div class="usage-filter-row">
+                      <label>
+                        Start Date
+                        <input id="usage-start-date" type="date" />
+                      </label>
+                      <label>
+                        End Date
+                        <input id="usage-end-date" type="date" />
+                      </label>
+                      <label>
+                        Grouping
+                        <select id="usage-grouping">
+                          <option value="">none</option>
+                          <option value="models">model</option>
+                          <option value="method">method</option>
+                          <option value="tags">tag</option>
+                          <option value="feature_set">feature set</option>
+                          <option value="deployment">deployment</option>
+                          <option value="accessor">accessor</option>
+                          <option value="endpoint">endpoint</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div id="usage-summary" class="usage-summary"></div>
+                    <div id="usage-list" class="usage-list"></div>
+                  </div>
+                  <div class="usage-breakdown-panel openrouter-usage-panel">
+                    <div class="panel-title-row">
+                      <h4>OpenRouter Usage</h4>
+                      <button id="refresh-openrouter-usage-btn" type="button">Refresh OpenRouter</button>
+                    </div>
+                    <p class="panel-intro">
+                      Key-level credits and rate-limit snapshot for summary generation.
+                    </p>
+                    <div id="openrouter-usage-summary" class="usage-summary"></div>
+                    <div id="openrouter-usage-list" class="usage-list"></div>
+                  </div>
+                </div>
+              </section>
             </section>
           </section>
         </section>

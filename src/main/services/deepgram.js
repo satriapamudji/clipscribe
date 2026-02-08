@@ -61,6 +61,37 @@ async function requestJson({
   }
 }
 
+async function requestPublicJson({
+  url,
+  apiKey = "",
+  method = "GET",
+  timeoutMs = 20000
+}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const headers = {
+      Accept: "application/json"
+    };
+    if (String(apiKey || "").trim()) {
+      headers.Authorization = `Token ${String(apiKey).trim()}`;
+    }
+    const response = await fetch(url, {
+      method,
+      headers,
+      signal: controller.signal
+    });
+    const json = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const msg = json?.err_msg || json?.message || response.statusText;
+      throw new Error(`Deepgram error ${response.status}: ${msg} (${url})`);
+    }
+    return json;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function normalizeDate(value) {
   const text = String(value || "").trim();
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
@@ -293,7 +324,48 @@ async function getUsageBreakdown({
   };
 }
 
+async function listSttModels({ apiKey = "", timeoutMs = 20000 } = {}) {
+  let json = null;
+  try {
+    json = await requestPublicJson({
+      url: `${DEEPGRAM_API_ROOT}/models`,
+      apiKey,
+      method: "GET",
+      timeoutMs
+    });
+  } catch (error) {
+    if (!String(apiKey || "").trim()) {
+      throw error;
+    }
+    json = await requestPublicJson({
+      url: `${DEEPGRAM_API_ROOT}/models`,
+      apiKey: "",
+      method: "GET",
+      timeoutMs
+    });
+  }
+  const stt = Array.isArray(json?.stt) ? json.stt : [];
+  const models = stt
+    .map((row) => ({
+      canonical: String(row?.canonical_name || "").trim(),
+      name: String(row?.name || "").trim(),
+      batch: row?.batch
+    }))
+    .filter((row) => row.batch !== false)
+    .map((row) => row.canonical || row.name)
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .filter((value, index, list) => list.indexOf(value) === index)
+    .sort((a, b) => a.localeCompare(b));
+
+  return {
+    models,
+    fetched_at: new Date().toISOString()
+  };
+}
+
 module.exports = {
   transcribePreRecorded,
-  getUsageBreakdown
+  getUsageBreakdown,
+  listSttModels
 };

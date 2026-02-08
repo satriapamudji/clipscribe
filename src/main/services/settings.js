@@ -1,11 +1,14 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const DEFAULT_SUMMARY_MODEL = "openrouter/free";
 
 const DEFAULT_SETTINGS = Object.freeze({
   chunk_seconds: 120,
   deepgram_api_key: "",
   deepgram_project_id: "",
   deepgram_model: "nova-3",
+  openrouter_api_key: "",
+  openrouter_model: DEFAULT_SUMMARY_MODEL,
   ffmpeg_path: "ffmpeg",
   ffprobe_path: "ffprobe",
   storage_root: "",
@@ -33,6 +36,9 @@ function createSettingsService({ settingsPath, fallbackStorageRoot }) {
   function getSettings() {
     const raw = loadJson(settingsPath) || {};
     const merged = { ...DEFAULT_SETTINGS, ...raw };
+    if (!String(merged.openrouter_model || "").trim()) {
+      merged.openrouter_model = DEFAULT_SUMMARY_MODEL;
+    }
     if (!merged.storage_root) {
       merged.storage_root = fallbackStorageRoot;
     }
@@ -72,6 +78,9 @@ function createSettingsService({ settingsPath, fallbackStorageRoot }) {
       throw new Error("estimated_stt_usd_per_min must be between 0 and 10.");
     }
     next.estimated_stt_usd_per_min = Number(next.estimated_stt_usd_per_min);
+    const incomingModel = String(next.openrouter_model || "").trim();
+    next.openrouter_model = !incomingModel ? DEFAULT_SUMMARY_MODEL : incomingModel;
+    next.openrouter_api_key = String(next.openrouter_api_key || "").trim();
 
     fs.mkdirSync(next.storage_root, { recursive: true });
     fs.writeFileSync(settingsPath, JSON.stringify(next, null, 2), "utf8");
