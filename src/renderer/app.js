@@ -2,7 +2,6 @@
 const DEFAULT_SUMMARY_MODEL = "openrouter/free";
 const FREE_OPENROUTER_MODELS = [
   DEFAULT_SUMMARY_MODEL,
-  "meta-llama/llama-3.1-70b-instruct:free",
   "mistralai/mistral-small-3.1-24b-instruct:free",
   "google/gemma-3-27b-it:free",
   "google/gemma-3-12b-it:free",
@@ -42,6 +41,9 @@ const state = {
   usageError: "",
   summaryGenerating: false,
   summaryProgress: null,
+  chatSending: false,
+  chatCitationFocus: null,
+  chatLineEntries: [],
   deepgramModels: [...DEFAULT_DEEPGRAM_MODELS],
   deepgramModelsLoading: false,
   deepgramModelsStatus: "",
@@ -51,7 +53,9 @@ const state = {
   openRouterModelsStatus: "",
   openRouterUsage: null,
   openRouterUsageError: "",
-  openRouterUsageLoading: false
+  openRouterUsageLoading: false,
+  openRouterRawLogPath: "",
+  openRouterRawLogExists: false
 };
 
 const els = {
@@ -86,6 +90,7 @@ const els = {
   captureTabSessions: document.getElementById("capture-tab-sessions"),
   captureTabTranscript: document.getElementById("capture-tab-transcript"),
   detailTabTranscript: document.getElementById("detail-tab-transcript"),
+  detailTabChat: document.getElementById("detail-tab-chat"),
   detailTabSummary: document.getElementById("detail-tab-summary"),
   detailTabTimeline: document.getElementById("detail-tab-timeline"),
   detailTabTimelineCount: document.getElementById("detail-tab-timeline-count"),
@@ -93,8 +98,14 @@ const els = {
   captureSessionsPanel: document.getElementById("capture-sessions-panel"),
   captureTranscriptPanel: document.getElementById("capture-transcript-panel"),
   detailTranscriptPane: document.getElementById("detail-transcript-pane"),
+  detailChatPane: document.getElementById("detail-chat-pane"),
   detailSummaryPane: document.getElementById("detail-summary-pane"),
   detailEventsPane: document.getElementById("detail-events-pane"),
+  detailChatList: document.getElementById("detail-chat-list"),
+  detailChatStatus: document.getElementById("detail-chat-status"),
+  detailChatInput: document.getElementById("detail-chat-input"),
+  detailChatSendBtn: document.getElementById("detail-chat-send-btn"),
+  detailChatCitationPreview: document.getElementById("detail-chat-citation-preview"),
   settingsTabHealth: document.getElementById("settings-tab-health"),
   settingsTabDefaults: document.getElementById("settings-tab-defaults"),
   settingsTabTranscription: document.getElementById("settings-tab-transcription"),
@@ -148,6 +159,9 @@ const els = {
   refreshOpenRouterModelsBtn: document.getElementById("refresh-openrouter-models-btn"),
   openRouterModelsStatus: document.getElementById("openrouter-models-status"),
   refreshOpenRouterUsageBtn: document.getElementById("refresh-openrouter-usage-btn"),
+  openOpenRouterRawLogBtn: document.getElementById("open-openrouter-raw-log-btn"),
+  copyOpenRouterRawLogPathBtn: document.getElementById("copy-openrouter-raw-log-path-btn"),
+  openRouterRawLogHint: document.getElementById("openrouter-raw-log-hint"),
   openRouterUsageSummary: document.getElementById("openrouter-usage-summary"),
   openRouterUsageList: document.getElementById("openrouter-usage-list"),
   estimatedSttUsdPerMin: document.getElementById("estimated-stt-usd-per-min"),
@@ -390,26 +404,50 @@ function parseTranscriptDisplayRows(text) {
   });
 }
 
-function buildChunkTextMarkup(text) {
+function parseClockTokenToSeconds(clockToken) {
+  const normalized = normalizeClockToken(clockToken);
+  const parts = String(normalized || "").split(":").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 3 || parts.some((value) => !Number.isFinite(value) || value < 0)) {
+    return null;
+  }
+  return (parts[0] * 3600) + (parts[1] * 60) + parts[2];
+}
+
+function buildChunkTextMarkup(text, chunkIndex = 0) {
   const rows = parseTranscriptDisplayRows(text);
   const hasTimed = rows.some((row) => row.kind === "timed");
   if (!hasTimed) {
     return `<div class="chunk-text-plain">${safeText(text)}</div>`;
   }
 
+  let lineNumber = 0;
   const html = rows
     .map((row) => {
       if (row.kind !== "timed") {
         const raw = String(row.raw || "").trim();
-        return `<div class="chunk-line raw"><span class="chunk-line-content">${safeText(raw)}</span></div>`;
+        const hasText = Boolean(raw);
+        if (hasText) {
+          lineNumber += 1;
+        }
+        const lineIdAttr = hasText
+          ? ` data-line-id="c${Number(chunkIndex || 0)}-l${lineNumber}"`
+          : "";
+        return `<div class="chunk-line raw"${lineIdAttr}><span class="chunk-line-content">${safeText(raw)}</span></div>`;
       }
       const speaker = String(row.speaker || "").trim();
       const content = String(row.content || "").trim();
+      const hasText = Boolean(content);
+      if (hasText) {
+        lineNumber += 1;
+      }
+      const lineIdAttr = hasText
+        ? ` data-line-id="c${Number(chunkIndex || 0)}-l${lineNumber}"`
+        : "";
       const speakerHtml = speaker
         ? `<span class="chunk-line-speaker">${safeText(speaker)}:</span>`
         : '<span class="chunk-line-speaker"></span>';
       return `
-        <div class="chunk-line">
+        <div class="chunk-line"${lineIdAttr}>
           <span class="chunk-line-range">${safeText(row.range || "")}</span>
           ${speakerHtml}
           <span class="chunk-line-content">${safeText(content)}</span>
@@ -419,6 +457,83 @@ function buildChunkTextMarkup(text) {
     .join("");
 
   return `<div class="chunk-lines">${html}</div>`;
+}
+
+function buildSessionChatLineEntries(chunks, aliasMap) {
+  const entries = [];
+  for (const chunk of chunks || []) {
+    const rawText = String(chunk?.text || "").trim();
+    if (!rawText) {
+      continue;
+    }
+    const aliased = applySpeakerAliasesToText(rawText, aliasMap);
+    const rows = parseTranscriptDisplayRows(aliased);
+    let lineNumber = 0;
+    for (const row of rows) {
+      const content = row.kind === "timed"
+        ? String(row.content || "").trim()
+        : String(row.raw || "").trim();
+      if (!content) {
+        continue;
+      }
+      lineNumber += 1;
+      const rangeMatch = row.kind === "timed"
+        ? String(row.range || "").match(/^\[(.+?)-(.+?)\]$/)
+        : null;
+      const parsedStart = rangeMatch ? parseClockTokenToSeconds(rangeMatch[1]) : null;
+      const parsedEnd = rangeMatch ? parseClockTokenToSeconds(rangeMatch[2]) : null;
+      const startSec = Number.isFinite(parsedStart) ? parsedStart : Number(chunk.start_sec || 0);
+      const endSec = Number.isFinite(parsedEnd) ? parsedEnd : Number(chunk.end_sec || startSec);
+      entries.push({
+        line_id: `c${Number(chunk.chunk_index || 0)}-l${lineNumber}`,
+        chunk_index: Number(chunk.chunk_index || 0),
+        start_sec: startSec,
+        end_sec: endSec,
+        speaker: row.kind === "timed" ? String(row.speaker || "").trim() : "",
+        text: content
+      });
+    }
+  }
+  return entries;
+}
+
+function buildChatLineLookup(entries) {
+  const byId = new Map();
+  const ordered = [];
+  for (let i = 0; i < (entries || []).length; i += 1) {
+    const entry = entries[i];
+    const lineId = String(entry?.line_id || "").trim().toLowerCase();
+    if (!lineId) {
+      continue;
+    }
+    const normalized = {
+      ...entry,
+      line_id: String(entry.line_id || "").trim(),
+      __idx: ordered.length
+    };
+    ordered.push(normalized);
+    byId.set(lineId, normalized);
+  }
+  return { byId, ordered };
+}
+
+function getCitationPreviewText(citation) {
+  const speaker = String(citation?.speaker || "").trim();
+  const text = String(citation?.text || "").trim();
+  if (!text) {
+    return "";
+  }
+  return speaker ? `${speaker}: ${text}` : text;
+}
+
+function formatCitationPill(citation) {
+  const start = Number(citation?.start_sec);
+  const end = Number(citation?.end_sec);
+  const speaker = String(citation?.speaker || "").trim();
+  const base = Number.isFinite(start) && Number.isFinite(end)
+    ? `${formatShortClock(start)}-${formatShortClock(end)}`
+    : String(citation?.line_id || "").trim();
+  return speaker ? `${base} ${speaker}` : base;
 }
 
 function unwrapMarkdownCodeFence(text) {
@@ -1168,11 +1283,12 @@ function setCaptureSubView(nextSubView) {
 }
 
 function setDetailSubView(nextSubView) {
-  const valid = ["transcript", "summary", "timeline"];
+  const valid = ["transcript", "summary", "timeline", "chat"];
   state.detailSubView = valid.includes(nextSubView) ? nextSubView : "transcript";
   const isTranscript = state.detailSubView === "transcript";
   const isSummary = state.detailSubView === "summary";
   const isTimeline = state.detailSubView === "timeline";
+  const isChat = state.detailSubView === "chat";
   if (els.detailTranscriptPane) {
     els.detailTranscriptPane.classList.toggle("hidden", !isTranscript);
   }
@@ -1181,6 +1297,9 @@ function setDetailSubView(nextSubView) {
   }
   if (els.detailEventsPane) {
     els.detailEventsPane.classList.toggle("hidden", !isTimeline);
+  }
+  if (els.detailChatPane) {
+    els.detailChatPane.classList.toggle("hidden", !isChat);
   }
   if (els.detailTabTranscript) {
     els.detailTabTranscript.classList.toggle("active", isTranscript);
@@ -1193,6 +1312,13 @@ function setDetailSubView(nextSubView) {
   if (els.detailTabTimeline) {
     els.detailTabTimeline.classList.toggle("active", isTimeline);
     els.detailTabTimeline.setAttribute("aria-selected", isTimeline ? "true" : "false");
+  }
+  if (els.detailTabChat) {
+    els.detailTabChat.classList.toggle("active", isChat);
+    els.detailTabChat.setAttribute("aria-selected", isChat ? "true" : "false");
+  }
+  if (!isChat) {
+    hideCitationPreviewTooltip();
   }
 }
 
@@ -1382,6 +1508,7 @@ function renderFolders() {
       const inFolder = (folder.sessions || []).some((session) => session.id === state.selectedSessionId);
       if (!inFolder) {
         state.selectedSessionId = (folder.sessions || [])[0]?.id || null;
+        state.chatCitationFocus = null;
         void renderDetail();
       }
       renderFolders();
@@ -1460,12 +1587,14 @@ function renderSessions() {
     `;
     card.addEventListener("click", async () => {
       state.selectedSessionId = session.id;
+      state.chatCitationFocus = null;
       renderSessions();
       renderControls();
       await renderDetail();
     });
     card.addEventListener("dblclick", async () => {
       state.selectedSessionId = session.id;
+      state.chatCitationFocus = null;
       state.captureSubView = "transcript";
       setCaptureSubView(state.captureSubView);
       renderSessions();
@@ -1945,6 +2074,254 @@ function renderDetailSummary(session) {
     : '<p class="summary-empty">Set OpenRouter API key in Settings to enable automatic summaries.</p>';
 }
 
+function highlightTranscriptLineById(lineId) {
+  const normalized = String(lineId || "").trim().toLowerCase();
+  if (!normalized || !els.detailChunks) {
+    return false;
+  }
+  const all = els.detailChunks.querySelectorAll(".chunk-line.jump-highlight");
+  for (const row of all) {
+    row.classList.remove("jump-highlight");
+  }
+  const target = els.detailChunks.querySelector(`[data-line-id="${normalized}"]`);
+  if (!target) {
+    return false;
+  }
+  target.classList.add("jump-highlight");
+  target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+  clearTimeout(highlightTranscriptLineById._timer);
+  highlightTranscriptLineById._timer = setTimeout(() => {
+    target.classList.remove("jump-highlight");
+  }, 2600);
+  return true;
+}
+
+function jumpToCitationLine(citation) {
+  const lineId = String(citation?.line_id || "").trim();
+  if (!lineId) {
+    return;
+  }
+  setDetailSubView("transcript");
+  requestAnimationFrame(() => {
+    const found = highlightTranscriptLineById(lineId);
+    if (!found) {
+      showToast("Could not locate cited line in transcript.", true);
+    }
+  });
+}
+
+function hideCitationPreviewTooltip() {
+  if (!els.detailChatCitationPreview) {
+    return;
+  }
+  els.detailChatCitationPreview.classList.add("hidden");
+  els.detailChatCitationPreview.textContent = "";
+}
+
+function showCitationPreviewTooltip(text, event) {
+  if (!els.detailChatCitationPreview) {
+    return;
+  }
+  const message = String(text || "").trim();
+  if (!message) {
+    hideCitationPreviewTooltip();
+    return;
+  }
+  const preview = els.detailChatCitationPreview;
+  preview.textContent = message;
+  preview.classList.remove("hidden");
+  const offset = 12;
+  const width = preview.offsetWidth || 280;
+  const height = preview.offsetHeight || 80;
+  const maxLeft = Math.max(8, window.innerWidth - width - 8);
+  const maxTop = Math.max(8, window.innerHeight - height - 8);
+  const pointerX = Number(event?.clientX || 0) + offset;
+  const pointerY = Number(event?.clientY || 0) + offset;
+  preview.style.left = `${Math.max(8, Math.min(pointerX, maxLeft))}px`;
+  preview.style.top = `${Math.max(8, Math.min(pointerY, maxTop))}px`;
+}
+
+function buildCitationContextRows(citation, lineLookup) {
+  const lineId = String(citation?.line_id || "").trim().toLowerCase();
+  const ordered = Array.isArray(lineLookup?.ordered) ? lineLookup.ordered : [];
+  const byId = lineLookup?.byId instanceof Map ? lineLookup.byId : new Map();
+  const found = byId.get(lineId);
+  if (!found) {
+    const speaker = String(citation?.speaker || "").trim();
+    const text = String(citation?.text || "").trim();
+    if (!text) {
+      return [];
+    }
+    return [
+      {
+        line_id: String(citation?.line_id || "").trim(),
+        start_sec: Number(citation?.start_sec || 0),
+        end_sec: Number(citation?.end_sec || 0),
+        speaker,
+        text,
+        current: true
+      }
+    ];
+  }
+  const idx = Number(found.__idx || 0);
+  const start = Math.max(0, idx - 2);
+  const end = Math.min(ordered.length - 1, idx + 2);
+  const rows = [];
+  for (let i = start; i <= end; i += 1) {
+    const row = ordered[i];
+    rows.push({
+      ...row,
+      current: i === idx
+    });
+  }
+  return rows;
+}
+
+function renderDetailChat(session, chatMessages, lineEntries) {
+  if (!els.detailChatList || !els.detailChatStatus) {
+    return;
+  }
+  const scrollSnapshot = captureScrollState(els.detailChatList);
+  const hasSummaryApiKey = Boolean(String(state.settings?.openrouter_api_key || "").trim());
+  const canAsk = Boolean(session) && hasSummaryApiKey && !state.chatSending && (lineEntries || []).length > 0;
+  if (els.detailChatSendBtn) {
+    els.detailChatSendBtn.disabled = !canAsk;
+    els.detailChatSendBtn.textContent = state.chatSending ? "Thinking..." : "Ask Transcript";
+  }
+  if (!session) {
+    els.detailChatStatus.textContent = "Select a session to start transcript-grounded chat.";
+    els.detailChatList.innerHTML = '<div class="muted">No session selected.</div>';
+    hideCitationPreviewTooltip();
+    return;
+  }
+  if (!hasSummaryApiKey) {
+    els.detailChatStatus.textContent = "Add OpenRouter API key in Settings to enable session chat.";
+  } else if ((lineEntries || []).length === 0) {
+    els.detailChatStatus.textContent = "No transcript lines available yet. Start recording and wait for transcription.";
+  } else if (state.chatSending) {
+    els.detailChatStatus.textContent = "Answering from this session transcript only...";
+  } else {
+    els.detailChatStatus.textContent = "Grounded to this session transcript only.";
+  }
+
+  const lineLookup = buildChatLineLookup(lineEntries || []);
+  const messages = Array.isArray(chatMessages) ? chatMessages : [];
+  if (messages.length === 0) {
+    els.detailChatList.innerHTML = '<div class="muted">Ask a question about this session. Answers cite transcript lines.</div>';
+    hideCitationPreviewTooltip();
+    return;
+  }
+
+  els.detailChatList.innerHTML = "";
+  for (const message of messages) {
+    const role = String(message?.role || "assistant").trim().toLowerCase();
+    const row = document.createElement("div");
+    row.className = `chat-msg ${role === "user" ? "user" : role === "assistant" ? "assistant" : "system"}`;
+    const roleLabel = role === "user" ? "You" : role === "assistant" ? "ClipScribe" : "System";
+    const createdAt = message?.created_at ? dateFormatter.format(new Date(message.created_at)) : "";
+    const bodyHtml = role === "assistant"
+      ? (markdownToSafeHtml(String(message?.content || "").trim()) || `<p>${safeText(String(message?.content || "").trim())}</p>`)
+      : `<p>${safeText(String(message?.content || "").trim()).replace(/\n/g, "<br />")}</p>`;
+
+    row.innerHTML = `
+      <article class="chat-bubble">
+        <div class="chat-msg-head">
+          <span class="chat-msg-role">${safeText(roleLabel)}</span>
+          <span class="chat-msg-time">${safeText(createdAt)}</span>
+        </div>
+        <div class="chat-msg-body">${bodyHtml}</div>
+      </article>
+    `;
+    const bubble = row.querySelector(".chat-bubble");
+    const citations = Array.isArray(message?.citations) ? message.citations : [];
+    if (role === "assistant" && citations.length > 0 && bubble) {
+      const citationWrap = document.createElement("div");
+      citationWrap.className = "chat-citations";
+      const focused = state.chatCitationFocus &&
+        state.chatCitationFocus.messageId === message.id
+        ? String(state.chatCitationFocus.lineId || "").toLowerCase()
+        : "";
+      for (const citation of citations) {
+        const lineId = String(citation?.line_id || "").trim();
+        if (!lineId) {
+          continue;
+        }
+        const lowerLineId = lineId.toLowerCase();
+        const lookupCitation = lineLookup.byId.get(lowerLineId);
+        const effectiveCitation = lookupCitation
+          ? {
+              ...citation,
+              line_id: lookupCitation.line_id,
+              start_sec: lookupCitation.start_sec,
+              end_sec: lookupCitation.end_sec,
+              speaker: lookupCitation.speaker,
+              text: lookupCitation.text
+            }
+          : citation;
+        const pill = document.createElement("button");
+        pill.type = "button";
+        pill.className = `chat-citation-pill${focused === lowerLineId ? " active" : ""}`;
+        pill.textContent = formatCitationPill(effectiveCitation);
+        const previewText = getCitationPreviewText(effectiveCitation);
+        pill.addEventListener("mouseenter", (event) => {
+          showCitationPreviewTooltip(previewText, event);
+        });
+        pill.addEventListener("mousemove", (event) => {
+          showCitationPreviewTooltip(previewText, event);
+        });
+        pill.addEventListener("mouseleave", () => {
+          hideCitationPreviewTooltip();
+        });
+        pill.addEventListener("click", () => {
+          const nextFocused = focused === lowerLineId
+            ? null
+            : { messageId: message.id, lineId: lowerLineId };
+          state.chatCitationFocus = nextFocused;
+          if (nextFocused) {
+            jumpToCitationLine(effectiveCitation);
+          } else {
+            renderDetailChat(session, messages, lineEntries);
+          }
+        });
+        citationWrap.appendChild(pill);
+      }
+      if (citationWrap.children.length > 0) {
+        bubble.appendChild(citationWrap);
+      }
+
+      const activeCitation = citations.find((item) => {
+        const lineId = String(item?.line_id || "").trim().toLowerCase();
+        return lineId && lineId === focused;
+      });
+      if (activeCitation && bubble) {
+        const contextRows = buildCitationContextRows(activeCitation, lineLookup);
+        if (contextRows.length > 0) {
+          const panel = document.createElement("section");
+          panel.className = "chat-citation-context";
+          const title = document.createElement("p");
+          title.className = "chat-citation-context-title";
+          title.textContent = "Transcript Context";
+          panel.appendChild(title);
+          for (const contextRow of contextRows) {
+            const rowEl = document.createElement("div");
+            rowEl.className = `chat-citation-line${contextRow.current ? " current" : ""}`;
+            const speakerPrefix = String(contextRow.speaker || "").trim();
+            rowEl.innerHTML = `
+              <span class="chat-citation-line-time">[${safeText(formatShortClock(contextRow.start_sec))}-${safeText(formatShortClock(contextRow.end_sec))}]</span>
+              <span class="chat-citation-line-text">${safeText(speakerPrefix ? `${speakerPrefix}: ${contextRow.text}` : contextRow.text)}</span>
+            `;
+            panel.appendChild(rowEl);
+          }
+          bubble.appendChild(panel);
+        }
+      }
+    }
+
+    els.detailChatList.appendChild(row);
+  }
+  restoreScrollState(els.detailChatList, scrollSnapshot, true);
+}
+
 async function saveSpeakerAlias(sessionId, speakerId, aliasInput, triggerButton, options = {}) {
   const alias = String(aliasInput || "").trim();
   const previousAlias = String(options.previousAlias || "").trim();
@@ -2203,6 +2580,7 @@ async function renderDetail() {
   els.detailChunks.innerHTML = "";
   els.detailEvents.innerHTML = "";
   els.detailMeta.textContent = "";
+  state.chatLineEntries = [];
   renderDetailSummary(null);
   if (els.detailSpeakers) {
     els.detailSpeakers.innerHTML = "";
@@ -2221,6 +2599,7 @@ async function renderDetail() {
     transcriptEmpty.className = "muted";
     transcriptEmpty.textContent = "Select a session to view transcript chunks.";
     els.detailChunks.appendChild(transcriptEmpty);
+    renderDetailChat(null, [], []);
     return;
   }
 
@@ -2234,6 +2613,9 @@ async function renderDetail() {
   const session = detail.session;
   renderDetailSummary(session);
   const speakerAliasMap = buildSpeakerAliasMap(detail.events || []);
+  const chatLineEntries = buildSessionChatLineEntries(detail.chunks || [], speakerAliasMap);
+  state.chatLineEntries = chatLineEntries;
+  renderDetailChat(session, detail.chat_messages || [], chatLineEntries);
   const speakerIds = getSpeakerIdsFromChunks(detail.chunks || []);
   renderSpeakerAliasPanel(session.id, speakerIds, speakerAliasMap);
   els.detailMeta.textContent = `${session.status} | ${formatSeconds(getDisplayRecordedSeconds(session))}`;
@@ -2300,7 +2682,7 @@ async function renderDetail() {
           <button data-copy-chunk="${safeText(chunk.id)}">Copy</button>
         </div>
       </div>
-      <div class="chunk-text">${buildChunkTextMarkup(text)}</div>
+      <div class="chunk-text">${buildChunkTextMarkup(text, Number(chunk.chunk_index || 0))}</div>
     `;
     const copyBtn = row.querySelector("button[data-copy-chunk]");
     copyBtn.addEventListener("click", async () => {
@@ -2607,6 +2989,7 @@ function renderSettings() {
       ? "Loading..."
       : "Refresh OpenRouter";
   }
+  renderOpenRouterRawLogInfo();
   els.preprocessProfile.value = settings.transcription_preprocess_profile || "fast";
   els.preprocessTimeoutMs.value = String(settings.transcription_preprocess_timeout_ms || 5000);
   els.estimatedSttUsdPerMin.value = String(
@@ -2775,6 +3158,24 @@ function renderOpenRouterUsage() {
     `
     )
     .join("");
+}
+
+function renderOpenRouterRawLogInfo() {
+  if (els.openOpenRouterRawLogBtn) {
+    els.openOpenRouterRawLogBtn.disabled = false;
+  }
+  if (els.copyOpenRouterRawLogPathBtn) {
+    els.copyOpenRouterRawLogPathBtn.disabled = !state.openRouterRawLogPath;
+  }
+  if (!els.openRouterRawLogHint) {
+    return;
+  }
+  if (!state.openRouterRawLogPath) {
+    els.openRouterRawLogHint.textContent = "";
+    return;
+  }
+  const prefix = state.openRouterRawLogExists ? "Raw log ready" : "Raw log path";
+  els.openRouterRawLogHint.textContent = `${prefix}: ${state.openRouterRawLogPath}`;
 }
 
 function renderSessionFilters() {
@@ -2977,6 +3378,50 @@ async function copySessionSummary() {
   }
   await navigator.clipboard.writeText(summary);
   showToast("Summary copied.");
+}
+
+async function askChatForSelectedSession() {
+  const session = state.selectedSessionId ? findSession(state.selectedSessionId) : null;
+  if (!session) {
+    return;
+  }
+  const question = String(els.detailChatInput?.value || "").trim();
+  if (!question) {
+    showToast("Enter a question first.", true);
+    return;
+  }
+  if (!window.clipscribe.askSessionChat) {
+    showToast("Chat endpoint is not available.", true);
+    return;
+  }
+  if (state.chatLineEntries.length === 0) {
+    showToast("No transcript lines available yet for this session.", true);
+    return;
+  }
+
+  state.chatSending = true;
+  state.chatCitationFocus = null;
+  try {
+    const detail = await window.clipscribe.getSessionDetail(session.id);
+    const aliasMap = buildSpeakerAliasMap(detail.events || []);
+    const lineEntries = buildSessionChatLineEntries(detail.chunks || [], aliasMap);
+    renderDetailChat(detail.session, detail.chat_messages || [], lineEntries);
+  } catch (_) {
+    // best-effort pre-render
+  }
+
+  try {
+    await window.clipscribe.askSessionChat(session.id, question);
+    if (els.detailChatInput) {
+      els.detailChatInput.value = "";
+    }
+    showToast("Answer ready.");
+  } catch (error) {
+    showToast(friendlyError(error), true);
+  } finally {
+    state.chatSending = false;
+    await renderDetail();
+  }
 }
 
 async function renameSelectedSession() {
@@ -3315,6 +3760,57 @@ async function refreshOpenRouterUsage({ silent = false } = {}) {
   }
 }
 
+async function refreshOpenRouterRawLogInfo({ silent = false } = {}) {
+  if (!window.clipscribe.getOpenRouterRawLogInfo) {
+    return;
+  }
+  try {
+    const info = await window.clipscribe.getOpenRouterRawLogInfo();
+    state.openRouterRawLogPath = String(info?.path || "").trim();
+    state.openRouterRawLogExists = Boolean(info?.exists);
+  } catch (error) {
+    if (!silent) {
+      showToast(friendlyError(error), true);
+    }
+  } finally {
+    renderOpenRouterRawLogInfo();
+  }
+}
+
+async function openOpenRouterRawLog() {
+  if (!window.clipscribe.openOpenRouterRawLog) {
+    showToast("Open log is unavailable in this build.", true);
+    return;
+  }
+  try {
+    const payload = await window.clipscribe.openOpenRouterRawLog();
+    state.openRouterRawLogPath = String(payload?.path || state.openRouterRawLogPath || "").trim();
+    state.openRouterRawLogExists = true;
+    renderOpenRouterRawLogInfo();
+    showToast("Opened OpenRouter raw log.");
+  } catch (error) {
+    showToast(friendlyError(error), true);
+  }
+}
+
+async function copyOpenRouterRawLogPath() {
+  let targetPath = String(state.openRouterRawLogPath || "").trim();
+  if (!targetPath && window.clipscribe.getOpenRouterRawLogInfo) {
+    await refreshOpenRouterRawLogInfo({ silent: true });
+    targetPath = String(state.openRouterRawLogPath || "").trim();
+  }
+  if (!targetPath) {
+    showToast("OpenRouter log path is unavailable.", true);
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(targetPath);
+    showToast("Copied OpenRouter raw log path.");
+  } catch (error) {
+    showToast(friendlyError(error), true);
+  }
+}
+
 async function refreshUsageBreakdown() {
   if (!els.usageStartDate.value || !els.usageEndDate.value) {
     showToast("Pick both usage start and end dates.", true);
@@ -3459,6 +3955,9 @@ function wireEvents() {
   if (els.detailTabTranscript) {
     els.detailTabTranscript.addEventListener("click", () => setDetailSubView("transcript"));
   }
+  if (els.detailTabChat) {
+    els.detailTabChat.addEventListener("click", () => setDetailSubView("chat"));
+  }
   if (els.detailTabSummary) {
     els.detailTabSummary.addEventListener("click", () => setDetailSubView("summary"));
   }
@@ -3509,6 +4008,18 @@ function wireEvents() {
   if (els.detailCopySummaryBtn) {
     els.detailCopySummaryBtn.addEventListener("click", copySessionSummary);
   }
+  if (els.detailChatSendBtn) {
+    els.detailChatSendBtn.addEventListener("click", askChatForSelectedSession);
+  }
+  if (els.detailChatInput) {
+    els.detailChatInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey) {
+        return;
+      }
+      event.preventDefault();
+      void askChatForSelectedSession();
+    });
+  }
   els.renameSessionBtn.addEventListener("click", renameSelectedSession);
   els.deleteSessionBtn.addEventListener("click", deleteSelectedSession);
   els.newFolderBtn.addEventListener("click", createFolder);
@@ -3543,6 +4054,16 @@ function wireEvents() {
   if (els.refreshOpenRouterUsageBtn) {
     els.refreshOpenRouterUsageBtn.addEventListener("click", () => {
       void refreshOpenRouterUsage();
+    });
+  }
+  if (els.openOpenRouterRawLogBtn) {
+    els.openOpenRouterRawLogBtn.addEventListener("click", () => {
+      void openOpenRouterRawLog();
+    });
+  }
+  if (els.copyOpenRouterRawLogPathBtn) {
+    els.copyOpenRouterRawLogPathBtn.addEventListener("click", () => {
+      void copyOpenRouterRawLogPath();
     });
   }
   if (els.openrouterModel) {
@@ -3678,6 +4199,7 @@ async function init() {
   void refreshOpenRouterModels({ silent: true });
   void refreshDeepgramModels({ silent: true });
   void refreshOpenRouterUsage({ silent: true });
+  void refreshOpenRouterRawLogInfo({ silent: true });
   if ((state.sources || []).length === 0) {
     await refreshSources();
   }

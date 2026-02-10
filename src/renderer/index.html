@@ -211,6 +211,16 @@
                 >
                   Transcript
                 </button>
+                <button
+                  id="detail-tab-chat"
+                  class="detail-subtab"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="detail-chat-pane"
+                  type="button"
+                >
+                  Chat
+                </button>
               </nav>
               <section id="detail-transcript-pane" class="detail-pane hidden">
                 <div id="detail-chunks" class="chunks-list"></div>
@@ -226,6 +236,26 @@
                   </div>
                   <p id="detail-summary-meta" class="muted"></p>
                   <div id="detail-summary-text" class="summary-text"></div>
+                </section>
+              </section>
+              <section id="detail-chat-pane" class="detail-pane hidden">
+                <section class="chat-panel">
+                  <div class="chat-head">
+                    <h4>Session Chat</h4>
+                    <p id="detail-chat-status" class="muted"></p>
+                  </div>
+                  <div id="detail-chat-list" class="chat-list"></div>
+                  <div class="chat-compose">
+                    <textarea
+                      id="detail-chat-input"
+                      rows="3"
+                      placeholder="Ask about this session transcript..."
+                    ></textarea>
+                    <div class="actions compact-actions">
+                      <button id="detail-chat-send-btn" class="accent">Ask Transcript</button>
+                    </div>
+                  </div>
+                  <div id="detail-chat-citation-preview" class="chat-citation-preview hidden"></div>
                 </section>
               </section>
               <section id="detail-events-pane" class="detail-pane">
@@ -356,7 +386,6 @@
                         <div class="model-picker-row">
                           <select id="openrouter-model" name="openrouter_model">
                             <option value="openrouter/free">openrouter/free (Recommended Router)</option>
-                            <option value="meta-llama/llama-3.1-70b-instruct:free">meta-llama/llama-3.1-70b-instruct:free</option>
                             <option value="mistralai/mistral-small-3.1-24b-instruct:free">mistralai/mistral-small-3.1-24b-instruct:free</option>
                             <option value="google/gemma-3-27b-it:free">google/gemma-3-27b-it:free</option>
                             <option value="google/gemma-3-12b-it:free">google/gemma-3-12b-it:free</option>
@@ -454,11 +483,16 @@
                   <div class="usage-breakdown-panel openrouter-usage-panel">
                     <div class="panel-title-row">
                       <h4>OpenRouter Usage</h4>
-                      <button id="refresh-openrouter-usage-btn" type="button">Refresh OpenRouter</button>
+                      <div class="panel-title-actions">
+                        <button id="refresh-openrouter-usage-btn" type="button">Refresh OpenRouter</button>
+                        <button id="open-openrouter-raw-log-btn" type="button">Open Raw Log</button>
+                        <button id="copy-openrouter-raw-log-path-btn" type="button">Copy Log Path</button>
+                      </div>
                     </div>
                     <p class="panel-intro">
                       Key-level credits and rate-limit snapshot for summary generation.
                     </p>
+                    <p id="openrouter-raw-log-hint" class="panel-note muted"></p>
                     <div id="openrouter-usage-summary" class="usage-summary"></div>
                     <div id="openrouter-usage-list" class="usage-list"></div>
                   </div>

@@ -1,6 +1,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const DEFAULT_SUMMARY_MODEL = "openrouter/free";
+const LEGACY_UNAVAILABLE_OPENROUTER_MODELS = new Set([
+  "meta-llama/llama-3.1-70b-instruct:free"
+]);
 
 const DEFAULT_SETTINGS = Object.freeze({
   chunk_seconds: 120,
@@ -36,7 +39,10 @@ function createSettingsService({ settingsPath, fallbackStorageRoot }) {
   function getSettings() {
     const raw = loadJson(settingsPath) || {};
     const merged = { ...DEFAULT_SETTINGS, ...raw };
-    if (!String(merged.openrouter_model || "").trim()) {
+    const configuredModel = String(merged.openrouter_model || "").trim();
+    if (!configuredModel) {
+      merged.openrouter_model = DEFAULT_SUMMARY_MODEL;
+    } else if (LEGACY_UNAVAILABLE_OPENROUTER_MODELS.has(configuredModel)) {
       merged.openrouter_model = DEFAULT_SUMMARY_MODEL;
     }
     if (!merged.storage_root) {
@@ -79,7 +85,11 @@ function createSettingsService({ settingsPath, fallbackStorageRoot }) {
     }
     next.estimated_stt_usd_per_min = Number(next.estimated_stt_usd_per_min);
     const incomingModel = String(next.openrouter_model || "").trim();
-    next.openrouter_model = !incomingModel ? DEFAULT_SUMMARY_MODEL : incomingModel;
+    if (!incomingModel || LEGACY_UNAVAILABLE_OPENROUTER_MODELS.has(incomingModel)) {
+      next.openrouter_model = DEFAULT_SUMMARY_MODEL;
+    } else {
+      next.openrouter_model = incomingModel;
+    }
     next.openrouter_api_key = String(next.openrouter_api_key || "").trim();
 
     fs.mkdirSync(next.storage_root, { recursive: true });

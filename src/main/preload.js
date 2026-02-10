@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld("clipscribe", {
   listDeepgramModels: () => invoke("deepgram:list-models"),
   listOpenRouterFreeModels: () => invoke("openrouter:list-free-models"),
   getOpenRouterKeyInfo: () => invoke("openrouter:key-info"),
+  getOpenRouterRawLogInfo: () => invoke("openrouter:raw-log-info"),
+  openOpenRouterRawLog: () => invoke("openrouter:open-raw-log"),
 
   createFolder: (name) => invoke("folders:create", name),
   deleteFolder: (folderId) => invoke("folders:delete", folderId),
@@ -27,6 +29,7 @@ contextBridge.exposeInMainWorld("clipscribe", {
   moveSession: (sessionId, folderId) => invoke("sessions:move", { sessionId, folderId }),
   renameSession: (sessionId, title) => invoke("sessions:rename", { sessionId, title }),
   generateSessionSummary: (sessionId) => invoke("sessions:generate-summary", sessionId),
+  askSessionChat: (sessionId, question) => invoke("sessions:chat", { sessionId, question }),
   setSessionSpeakerAlias: (sessionId, speakerId, alias) =>
     invoke("sessions:set-speaker-alias", { sessionId, speakerId, alias }),
   deleteSession: (sessionId) => invoke("sessions:delete", sessionId),

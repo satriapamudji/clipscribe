@@ -6,6 +6,7 @@ const { app, BrowserWindow, ipcMain, shell, dialog } = require("electron");
 let mainWindow = null;
 let services = null;
 const startupLogPath = path.join(process.cwd(), "app-data", "startup.log");
+const openRouterRawLogPath = path.join(process.cwd(), "app-data", "openrouter-raw.log");
 let recoveredRendererOnce = false;
 
 function logStartup(message) {
@@ -240,6 +241,8 @@ function initServices() {
   const {
     summarizeTranscript,
     summarizeSessionBrief,
+    planSessionQuestion,
+    answerSessionQuestion,
     listFreeModels,
     getCurrentKeyInfo
   } = require("./services/openrouter");
@@ -283,7 +286,12 @@ function initServices() {
     settingsService,
     transcriptionWorker,
     eventSink,
-    summaryService: { summarizeTranscript, summarizeSessionBrief }
+    summaryService: {
+      summarizeTranscript,
+      summarizeSessionBrief,
+      planSessionQuestion,
+      answerSessionQuestion
+    }
   });
 
   recordingService.recoverInterruptedSessions();
@@ -491,6 +499,28 @@ function registerIpc() {
     }
   });
 
+  safeHandle("openrouter:raw-log-info", async () => {
+    return {
+      path: openRouterRawLogPath,
+      exists: fs.existsSync(openRouterRawLogPath)
+    };
+  });
+
+  safeHandle("openrouter:open-raw-log", async () => {
+    fs.mkdirSync(path.dirname(openRouterRawLogPath), { recursive: true });
+    if (!fs.existsSync(openRouterRawLogPath)) {
+      fs.writeFileSync(openRouterRawLogPath, "", "utf8");
+    }
+    const openError = await shell.openPath(openRouterRawLogPath);
+    if (openError) {
+      throw new Error(`Could not open raw log file: ${openError}`);
+    }
+    return {
+      ok: true,
+      path: openRouterRawLogPath
+    };
+  });
+
   safeHandle("folders:create", async (_, name) => {
     const folder = services.repo.createFolder(name);
     sendUpdate("app:global-updated", { at: new Date().toISOString() });
@@ -545,6 +575,12 @@ function registerIpc() {
 
   safeHandle("sessions:generate-summary", async (_, sessionId) => {
     return services.recordingService.generateSessionSummary(sessionId);
+  });
+
+  safeHandle("sessions:chat", async (_, payload) => {
+    const sessionId = String(payload?.sessionId || "").trim();
+    const question = String(payload?.question || "");
+    return services.recordingService.askSessionChat(sessionId, question);
   });
 
   safeHandle("sessions:set-speaker-alias", async (_, { sessionId, speakerId, alias }) => {

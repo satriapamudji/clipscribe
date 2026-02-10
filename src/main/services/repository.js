@@ -152,6 +152,18 @@ function createRepository(db) {
     WHERE session_id = ?
     ORDER BY at_sec ASC, datetime(created_at) ASC
   `);
+  const createChatMessageStmt = db.prepare(`
+    INSERT INTO session_chat_messages (
+      id, session_id, role, content, citations_json, meta_json, created_at
+    ) VALUES (
+      @id, @session_id, @role, @content, @citations_json, @meta_json, @created_at
+    )
+  `);
+  const listChatMessagesStmt = db.prepare(`
+    SELECT * FROM session_chat_messages
+    WHERE session_id = ?
+    ORDER BY datetime(created_at) ASC
+  `);
 
   function ensureDefaultFolder() {
     const existing = listFoldersStmt.all();
@@ -389,7 +401,53 @@ function createRepository(db) {
     listSessionEvents(sessionId) {
       return listEventsStmt.all(sessionId).map((event) => ({
         ...event,
-        payload: event.payload_json ? JSON.parse(event.payload_json) : null
+        payload: safeParseJson(event.payload_json, null)
+      }));
+    },
+
+    addSessionChatMessage(sessionId, role, content, citations = [], meta = null) {
+      const normalizedRole = String(role || "").trim().toLowerCase();
+      if (!["user", "assistant", "system"].includes(normalizedRole)) {
+        throw new Error("Chat role must be user, assistant, or system.");
+      }
+      const message = {
+        id: crypto.randomUUID(),
+        session_id: String(sessionId || "").trim(),
+        role: normalizedRole,
+        content: String(content || "").trim(),
+        citations_json: Array.isArray(citations) && citations.length > 0
+          ? JSON.stringify(citations)
+          : null,
+        meta_json: meta && typeof meta === "object" ? JSON.stringify(meta) : null,
+        created_at: nowIso()
+      };
+      if (!message.session_id) {
+        throw new Error("sessionId is required.");
+      }
+      if (!message.content) {
+        throw new Error("Chat content is required.");
+      }
+      createChatMessageStmt.run(message);
+      return {
+        id: message.id,
+        session_id: message.session_id,
+        role: message.role,
+        content: message.content,
+        citations: safeParseJson(message.citations_json, []),
+        meta: safeParseJson(message.meta_json, null),
+        created_at: message.created_at
+      };
+    },
+
+    listSessionChatMessages(sessionId) {
+      return listChatMessagesStmt.all(sessionId).map((row) => ({
+        id: row.id,
+        session_id: row.session_id,
+        role: String(row.role || "").trim().toLowerCase(),
+        content: String(row.content || ""),
+        citations: safeParseJson(row.citations_json, []),
+        meta: safeParseJson(row.meta_json, null),
+        created_at: row.created_at
       }));
     }
   };

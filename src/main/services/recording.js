@@ -93,6 +93,271 @@ function applySpeakerAliases(text, aliasMap) {
   });
 }
 
+function normalizeClockToken(token) {
+  const raw = String(token || "").trim();
+  const parts = raw.split(":").map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 2 || parts.length > 3 || parts.some((part) => !/^\d+$/.test(part))) {
+    return raw;
+  }
+  if (parts.length === 2) {
+    const [mm, ss] = parts;
+    return `00:${mm.padStart(2, "0")}:${ss.padStart(2, "0")}`;
+  }
+  const [hh, mm, ss] = parts;
+  return `${hh.padStart(2, "0")}:${mm.padStart(2, "0")}:${ss.padStart(2, "0")}`;
+}
+
+function parseClockToSeconds(clockToken) {
+  const normalized = normalizeClockToken(clockToken);
+  const parts = String(normalized || "").split(":").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 3 || parts.some((value) => !Number.isFinite(value) || value < 0)) {
+    return null;
+  }
+  return (parts[0] * 3600) + (parts[1] * 60) + parts[2];
+}
+
+function parseTranscriptRows(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  return lines.map((line) => {
+    const raw = String(line || "");
+    const timedMatch = raw.match(/^\[(.+?)\s*-\s*(.+?)\]\s*(.*)$/);
+    if (!timedMatch) {
+      return {
+        kind: "raw",
+        raw
+      };
+    }
+
+    const start = normalizeClockToken(timedMatch[1]);
+    const end = normalizeClockToken(timedMatch[2]);
+    const trailing = String(timedMatch[3] || "").trim();
+    const speakerMatch = trailing.match(/^([^:]{1,80}):\s*(.*)$/);
+    if (!speakerMatch) {
+      return {
+        kind: "timed",
+        start,
+        end,
+        speaker: "",
+        content: trailing
+      };
+    }
+    return {
+      kind: "timed",
+      start,
+      end,
+      speaker: String(speakerMatch[1] || "").trim(),
+      content: String(speakerMatch[2] || "").trim()
+    };
+  });
+}
+
+function tokenizeQuery(text) {
+  return String(text || "")
+    .toLowerCase()
+    .match(/[a-z0-9]{2,}/g) || [];
+}
+
+function normalizeHintList(values) {
+  const list = Array.isArray(values) ? values : [];
+  const out = [];
+  for (const raw of list) {
+    const value = String(raw || "").trim().toLowerCase();
+    if (!value) {
+      continue;
+    }
+    if (!out.includes(value)) {
+      out.push(value);
+    }
+  }
+  return out;
+}
+
+function buildSessionLineEntries(chunks, aliasMap) {
+  const rows = [];
+  for (const chunk of chunks || []) {
+    const rawText = String(chunk?.text || "").trim();
+    if (!rawText) {
+      continue;
+    }
+    const aliased = applySpeakerAliases(rawText, aliasMap);
+    const parsedRows = parseTranscriptRows(aliased);
+    let lineNumber = 0;
+    for (const parsed of parsedRows) {
+      const text = parsed.kind === "timed"
+        ? String(parsed.content || "").trim()
+        : String(parsed.raw || "").trim();
+      if (!text) {
+        continue;
+      }
+      lineNumber += 1;
+      const parsedStart = parsed.kind === "timed" ? parseClockToSeconds(parsed.start) : null;
+      const parsedEnd = parsed.kind === "timed" ? parseClockToSeconds(parsed.end) : null;
+      const startSec = Number.isFinite(parsedStart) ? parsedStart : Number(chunk.start_sec || 0);
+      const endSec = Number.isFinite(parsedEnd) ? parsedEnd : Number(chunk.end_sec || startSec);
+      rows.push({
+        line_id: `c${Number(chunk.chunk_index || 0)}-l${lineNumber}`,
+        chunk_index: Number(chunk.chunk_index || 0),
+        start_sec: startSec,
+        end_sec: endSec,
+        speaker: parsed.kind === "timed" ? String(parsed.speaker || "").trim() : "",
+        text
+      });
+    }
+  }
+  return rows;
+}
+
+function rankContextLines(lines, question, maxLines = 24, options = {}) {
+  const source = Array.isArray(lines) ? lines : [];
+  const query = String(question || "").trim().toLowerCase();
+  const tokens = tokenizeQuery(query);
+  const speakerHints = normalizeHintList(options?.speakerHints);
+  const topicHints = normalizeHintList(options?.topicHints);
+  const timelineScope = String(options?.timelineScope || "any").trim().toLowerCase();
+  if (source.length === 0) {
+    return [];
+  }
+
+  const scoredAll = source
+    .map((line, index) => {
+      const haystack = `${String(line.speaker || "").toLowerCase()} ${String(line.text || "").toLowerCase()}`;
+      let score = 0;
+      if (query && haystack.includes(query)) {
+        score += 8;
+      }
+      for (const token of tokens) {
+        if (haystack.includes(token)) {
+          score += 1;
+        }
+      }
+      if (line.speaker && query.includes(String(line.speaker || "").toLowerCase())) {
+        score += 2;
+      }
+      for (const hint of speakerHints) {
+        if (hint && String(line.speaker || "").toLowerCase().includes(hint)) {
+          score += 5;
+        }
+      }
+      for (const hint of topicHints) {
+        if (hint && haystack.includes(hint)) {
+          score += 2;
+        }
+      }
+      const position = source.length <= 1 ? 1 : index / (source.length - 1);
+      if (timelineScope === "recent") {
+        score += position * 2.8;
+      } else if (timelineScope === "start") {
+        score += (1 - position) * 2.2;
+      } else if (timelineScope === "middle") {
+        score += (1 - Math.abs(position - 0.5) * 2) * 1.8;
+      }
+      return {
+        ...line,
+        __idx: index,
+        __score: score
+      };
+    })
+    .sort((a, b) => a.__idx - b.__idx);
+
+  const positives = scoredAll
+    .filter((line) => line.__score > 0)
+    .sort((a, b) => {
+      if (b.__score !== a.__score) {
+        return b.__score - a.__score;
+      }
+      return b.__idx - a.__idx;
+    });
+
+  const baseTarget = Math.max(4, maxLines);
+  const broadQuery =
+    /\b(what|anything|all|everything)\b[\s\S]{0,24}\b(say|said)\b/.test(query) ||
+    (tokens.length <= 4 && (tokens.includes("say") || tokens.includes("said")));
+
+  let base = [];
+  if (positives.length > 0) {
+    if (broadQuery && source.length > 40 && positives.length > baseTarget) {
+      const bucketCount = Math.max(3, Math.min(8, Math.floor(baseTarget / 2)));
+      const bucketSize = Math.ceil(source.length / bucketCount);
+      const chosen = [];
+      const chosenIds = new Set();
+
+      for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+        const start = bucket * bucketSize;
+        const end = Math.min(source.length, start + bucketSize);
+        const hit = positives.find((line) => line.__idx >= start && line.__idx < end);
+        if (!hit || chosenIds.has(hit.line_id)) {
+          continue;
+        }
+        chosen.push(hit);
+        chosenIds.add(hit.line_id);
+      }
+
+      for (const row of positives) {
+        if (chosen.length >= baseTarget) {
+          break;
+        }
+        if (chosenIds.has(row.line_id)) {
+          continue;
+        }
+        chosen.push(row);
+        chosenIds.add(row.line_id);
+      }
+      base = chosen;
+    } else {
+      base = positives.slice(0, baseTarget);
+    }
+  }
+
+  const fallbackStart = Math.max(0, source.length - Math.max(8, maxLines));
+  base = base.length > 0
+    ? base
+    : source
+      .slice(fallbackStart)
+      .map((line, index) => ({
+        ...line,
+        __idx: fallbackStart + index,
+        __score: 0
+      }));
+
+  const baseIdSet = new Set(base.map((line) => line.line_id));
+  const idSet = new Set(base.map((line) => line.line_id));
+  for (const line of base) {
+    const before = source[line.__idx - 1];
+    const after = source[line.__idx + 1];
+    if (before) {
+      idSet.add(before.line_id);
+    }
+    if (after) {
+      idSet.add(after.line_id);
+    }
+  }
+
+  const limit = Math.max(10, maxLines + 8);
+  return scoredAll
+    .filter((line) => idSet.has(line.line_id))
+    .sort((a, b) => {
+      const aBase = baseIdSet.has(a.line_id) ? 1 : 0;
+      const bBase = baseIdSet.has(b.line_id) ? 1 : 0;
+      if (bBase !== aBase) {
+        return bBase - aBase;
+      }
+      if (b.__score !== a.__score) {
+        return b.__score - a.__score;
+      }
+      return b.__idx - a.__idx;
+    })
+    .slice(0, limit)
+    .sort((a, b) => a.__idx - b.__idx)
+    .map((row) => ({
+      line_id: row.line_id,
+      chunk_index: row.chunk_index,
+      start_sec: row.start_sec,
+      end_sec: row.end_sec,
+      speaker: row.speaker,
+      text: row.text
+    }));
+}
+
 function createRecordingService({
   repo,
   settingsService,
@@ -668,6 +933,110 @@ function createRecordingService({
     }
   }
 
+  async function askSessionChat(sessionId, question) {
+    const session = repo.getSession(sessionId);
+    if (!session) {
+      throw new Error("Session not found.");
+    }
+    const normalizedQuestion = String(question || "").trim();
+    if (!normalizedQuestion) {
+      throw new Error("Question is required.");
+    }
+    if (!summaryService || typeof summaryService.answerSessionQuestion !== "function") {
+      throw new Error("Chat service is not available.");
+    }
+    const settings = settingsService.getSettings();
+    const apiKey = String(settings?.openrouter_api_key || "").trim();
+    if (!apiKey) {
+      throw new Error("OpenRouter API key is missing. Add it in Transcription Settings.");
+    }
+
+    const chunks = repo
+      .listSessionChunks(sessionId)
+      .filter((chunk) => String(chunk?.status || "") === "done")
+      .filter((chunk) => String(chunk?.text || "").trim());
+    if (chunks.length === 0) {
+      throw new Error("No transcript text available yet for this session.");
+    }
+    const events = repo.listSessionEvents(sessionId);
+    const aliasMap = buildSpeakerAliasMap(events);
+    const lineEntries = buildSessionLineEntries(chunks, aliasMap);
+    if (lineEntries.length === 0) {
+      throw new Error("No transcript lines available to answer this question.");
+    }
+
+    let plan = {
+      intent: "general",
+      rewritten_query: normalizedQuestion,
+      speaker_hints: [],
+      topic_hints: [],
+      timeline_scope: "any",
+      answer_style: "paragraph"
+    };
+    if (summaryService && typeof summaryService.planSessionQuestion === "function") {
+      try {
+        plan = await summaryService.planSessionQuestion({
+          apiKey,
+          model: settings.openrouter_model || DEFAULT_SUMMARY_MODEL,
+          sessionTitle: session.title,
+          question: normalizedQuestion
+        });
+      } catch (_) {
+        // keep default plan
+      }
+    }
+
+    const rewritten = String(plan?.rewritten_query || "").trim();
+    const retrievalQuery = rewritten || normalizedQuestion;
+    const selectedContext = rankContextLines(
+      lineEntries,
+      retrievalQuery,
+      24,
+      {
+        speakerHints: plan?.speaker_hints,
+        topicHints: plan?.topic_hints,
+        timelineScope: plan?.timeline_scope
+      }
+    );
+    const history = repo
+      .listSessionChatMessages(sessionId)
+      .slice(-10)
+      .map((message) => ({
+        role: message.role,
+        content: message.content
+      }));
+
+    const userMessage = repo.addSessionChatMessage(sessionId, "user", normalizedQuestion, [], {
+      source: "session-chat"
+    });
+    const answer = await summaryService.answerSessionQuestion({
+      apiKey,
+      model: settings.openrouter_model || DEFAULT_SUMMARY_MODEL,
+      sessionTitle: session.title,
+      question: normalizedQuestion,
+      contextLines: selectedContext,
+      history
+    });
+    const assistantMessage = repo.addSessionChatMessage(
+      sessionId,
+      "assistant",
+      String(answer?.answer || "").trim() || "Not found in this session transcript.",
+      Array.isArray(answer?.citations) ? answer.citations : [],
+      {
+        model: String(answer?.model || settings.openrouter_model || DEFAULT_SUMMARY_MODEL).trim(),
+        source: "session-chat",
+        planner: plan,
+        retrieval_query: retrievalQuery,
+        context_line_count: selectedContext.length
+      }
+    );
+    emitSession(sessionId);
+    return {
+      user: userMessage,
+      assistant: assistantMessage
+    };
+  }
+
   function setSpeakerAlias(sessionId, speakerId, alias) {
     const session = repo.getSession(sessionId);
     if (!session) {
@@ -703,7 +1072,8 @@ function createRecordingService({
     return {
       session,
       chunks: repo.listSessionChunks(sessionId),
-      events: repo.listSessionEvents(sessionId)
+      events: repo.listSessionEvents(sessionId),
+      chat_messages: repo.listSessionChatMessages(sessionId)
     };
   }
 
@@ -811,6 +1181,7 @@ function createRecordingService({
     resumeSession,
     stopSession,
     generateSessionSummary,
+    askSessionChat,
     setSpeakerAlias,
     changeSessionSources,
     getSessionDetail,
