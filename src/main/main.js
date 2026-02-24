@@ -1,5 +1,6 @@
 const path = require("node:path");
 const fs = require("node:fs");
+const os = require("node:os");
 const { spawnSync } = require("node:child_process");
 const { app, BrowserWindow, ipcMain, shell, dialog } = require("electron");
 
@@ -8,6 +9,885 @@ let services = null;
 const startupLogPath = path.join(process.cwd(), "app-data", "startup.log");
 const openRouterRawLogPath = path.join(process.cwd(), "app-data", "openrouter-raw.log");
 let recoveredRendererOnce = false;
+
+function sanitizeExportFileStem(value) {
+  const raw = String(value || "").trim() || "session";
+  const cleaned = raw
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const truncated = cleaned.length > 72 ? cleaned.slice(0, 72).trim() : cleaned;
+  return truncated || "session";
+}
+
+function ensureUniquePath(targetPath) {
+  const resolved = path.resolve(String(targetPath || "").trim());
+  if (!resolved) {
+    return targetPath;
+  }
+  if (!fs.existsSync(resolved)) {
+    return resolved;
+  }
+  const dir = path.dirname(resolved);
+  const ext = path.extname(resolved);
+  const base = path.basename(resolved, ext);
+  for (let i = 2; i <= 200; i += 1) {
+    const candidate = path.join(dir, `${base} (${i})${ext}`);
+    if (!fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return resolved;
+}
+
+function normalizeClockToken(token) {
+  const raw = String(token || "").trim();
+  const parts = raw.split(":").map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 2 || parts.length > 3 || parts.some((part) => !/^\d+$/.test(part))) {
+    return raw;
+  }
+  if (parts.length === 2) {
+    const [mm, ss] = parts;
+    return `00:${mm.padStart(2, "0")}:${ss.padStart(2, "0")}`;
+  }
+  const [hh, mm, ss] = parts;
+  return `${hh.padStart(2, "0")}:${mm.padStart(2, "0")}:${ss.padStart(2, "0")}`;
+}
+
+function parseTranscriptDisplayRows(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  return lines.map((line) => {
+    const raw = String(line || "");
+    const timedMatch = raw.match(/^\[(.+?)\s*-\s*(.+?)\]\s*(.*)$/);
+    if (!timedMatch) {
+      return { kind: "raw", raw };
+    }
+
+    const start = normalizeClockToken(timedMatch[1]);
+    const end = normalizeClockToken(timedMatch[2]);
+    const trailing = String(timedMatch[3] || "").trim();
+    const speakerMatch = trailing.match(/^([^:]{1,80}):\s*(.*)$/);
+    if (!speakerMatch) {
+      return { kind: "timed", range: `[${start} - ${end}]`, speaker: "", content: trailing };
+    }
+    return {
+      kind: "timed",
+      range: `[${start} - ${end}]`,
+      speaker: String(speakerMatch[1] || "").trim(),
+      content: String(speakerMatch[2] || "").trim()
+    };
+  });
+}
+
+function buildSpeakerAliasMap(events) {
+  const aliasMap = {};
+  for (const event of events || []) {
+    if (String(event?.event_type || "") !== "speaker_alias") {
+      continue;
+    }
+    const speakerId = Number.parseInt(String(event?.payload?.speaker_id), 10);
+    if (!Number.isInteger(speakerId) || speakerId < 0) {
+      continue;
+    }
+    const alias = String(event?.payload?.alias || "").trim();
+    if (!alias) {
+      delete aliasMap[speakerId];
+    } else {
+      aliasMap[speakerId] = alias;
+    }
+  }
+  return aliasMap;
+}
+
+function applySpeakerAliases(text, aliasMap) {
+  const source = String(text || "");
+  if (!source) {
+    return "";
+  }
+  return source.replace(/\bSpeaker\s+(\d+):/g, (full, idText) => {
+    const speakerId = Number.parseInt(String(idText), 10);
+    if (!Number.isInteger(speakerId) || speakerId < 0) {
+      return full;
+    }
+    const alias = String(aliasMap?.[speakerId] || "").trim();
+    return alias ? `${alias}:` : full;
+  });
+}
+
+function escapeMarkdownCell(value) {
+  return String(value || "")
+    .replace(/\|/g, "\\|")
+    .replace(/\r?\n/g, "<br>")
+    .trim();
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function unwrapMarkdownCodeFence(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed.startsWith("```")) {
+    return trimmed;
+  }
+  const lines = trimmed.split(/\r?\n/);
+  if (lines.length < 3) {
+    return trimmed;
+  }
+  const last = lines[lines.length - 1].trim();
+  if (last !== "```") {
+    return trimmed;
+  }
+  return lines.slice(1, -1).join("\n").trim();
+}
+
+function applyInlineMarkdownLite(escapedText) {
+  const input = String(escapedText || "");
+  return input
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+}
+
+function renderMarkdownLiteToHtml(markdownText) {
+  const raw = unwrapMarkdownCodeFence(markdownText);
+  const lines = String(raw || "").split(/\r?\n/);
+
+  const out = [];
+  let inUl = false;
+  let inOl = false;
+
+  const closeLists = () => {
+    if (inUl) {
+      out.push("</ul>");
+      inUl = false;
+    }
+    if (inOl) {
+      out.push("</ol>");
+      inOl = false;
+    }
+  };
+
+  for (const line of lines) {
+    const trimmed = String(line || "").trimEnd();
+    const stripped = trimmed.trim();
+    if (!stripped) {
+      closeLists();
+      out.push('<div class="md-gap"></div>');
+      continue;
+    }
+
+    const headingMatch = stripped.match(/^(#{1,3})\s+(.*)$/);
+    if (headingMatch) {
+      closeLists();
+      const level = headingMatch[1].length;
+      const text = applyInlineMarkdownLite(escapeHtml(headingMatch[2] || ""));
+      if (level === 1) {
+        out.push(`<h3 class="md-h3">${text}</h3>`);
+      } else if (level === 2) {
+        out.push(`<h4 class="md-h4">${text}</h4>`);
+      } else {
+        out.push(`<h5 class="md-h5">${text}</h5>`);
+      }
+      continue;
+    }
+
+    const ulMatch = stripped.match(/^[-*]\s+(.*)$/);
+    if (ulMatch) {
+      if (inOl) {
+        out.push("</ol>");
+        inOl = false;
+      }
+      if (!inUl) {
+        out.push('<ul class="md-ul">');
+        inUl = true;
+      }
+      const item = applyInlineMarkdownLite(escapeHtml(ulMatch[1] || ""));
+      out.push(`<li>${item}</li>`);
+      continue;
+    }
+
+    const olMatch = stripped.match(/^\d+\.\s+(.*)$/);
+    if (olMatch) {
+      if (inUl) {
+        out.push("</ul>");
+        inUl = false;
+      }
+      if (!inOl) {
+        out.push('<ol class="md-ol">');
+        inOl = true;
+      }
+      const item = applyInlineMarkdownLite(escapeHtml(olMatch[1] || ""));
+      out.push(`<li>${item}</li>`);
+      continue;
+    }
+
+    closeLists();
+    const text = applyInlineMarkdownLite(escapeHtml(stripped)).replace(/\r?\n/g, "<br>");
+    out.push(`<p class="md-p">${text}</p>`);
+  }
+
+  closeLists();
+
+  const html = out
+    .join("\n")
+    .replace(/(<div class="md-gap"><\/div>\s*){3,}/g, '<div class="md-gap"></div>\n');
+  return html.trim();
+}
+
+function filterPdfSummarySections(markdownText) {
+  const text = unwrapMarkdownCodeFence(markdownText);
+  const lines = String(text || "").split(/\r?\n/);
+  const keptSections = [];
+  let current = null;
+
+  const shouldKeepHeading = (headingText) => {
+    const normalized = String(headingText || "")
+      .toLowerCase()
+      .replace(/[`*_:#-]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return (
+      normalized.startsWith("executive summary") ||
+      normalized.startsWith("exec summary") ||
+      normalized.startsWith("decisions") ||
+      normalized.startsWith("action items")
+    );
+  };
+
+  const flushCurrent = () => {
+    if (!current || !current.keep) {
+      current = null;
+      return;
+    }
+    const content = current.lines.join("\n").trim();
+    if (content) {
+      keptSections.push(content);
+    }
+    current = null;
+  };
+
+  for (const line of lines) {
+    const headingMatch = String(line || "").match(/^(#{1,3})\s+(.*)$/);
+    if (headingMatch) {
+      flushCurrent();
+      current = {
+        keep: shouldKeepHeading(headingMatch[2]),
+        lines: [String(line || "")]
+      };
+      continue;
+    }
+    if (!current) {
+      continue;
+    }
+    current.lines.push(String(line || ""));
+  }
+  flushCurrent();
+
+  if (keptSections.length > 0) {
+    return keptSections.join("\n\n").trim();
+  }
+
+  return String(text || "").trim();
+}
+
+function formatRecordedDurationForExport(secondsValue) {
+  const totalSeconds = Number(secondsValue || 0);
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) {
+    return "0s";
+  }
+  if (totalSeconds < 60) {
+    const rounded = Math.round(totalSeconds * 10) / 10;
+    return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}s`;
+  }
+
+  const rounded = Math.round(totalSeconds);
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const seconds = rounded % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
+  }
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+function formatTimestampForExport(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return raw;
+  }
+  return parsed.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function buildSessionTranscriptExportHtml(detail, options) {
+  const session = detail?.session || null;
+  if (!session) {
+    throw new Error("Session not found.");
+  }
+
+  const includeMeta = options?.include_meta !== false;
+  const includeSummary = Boolean(options?.include_summary);
+  const applyAliases = options?.apply_speaker_aliases !== false;
+
+  const aliasMap = buildSpeakerAliasMap(detail.events || []);
+  const chunkTexts = (detail.chunks || [])
+    .map((chunk) => {
+      const text = String(chunk?.text || "").trim();
+      if (!text) {
+        return null;
+      }
+      return applyAliases ? applySpeakerAliases(text, aliasMap) : text;
+    })
+    .filter(Boolean);
+
+  if (chunkTexts.length === 0) {
+    throw new Error("No transcript text available yet for this session.");
+  }
+
+  const title = String(session.title || "Untitled Session").trim() || "Untitled Session";
+  const startedAt = formatTimestampForExport(session.started_at || "");
+  const endedAt = formatTimestampForExport(session.ended_at || "");
+  const recordedSeconds = Number(session.recorded_seconds || 0);
+  const summaryText = String(session.summary_text || "").trim();
+  const pdfSummaryText = filterPdfSummarySections(summaryText);
+  const exportedAt = formatTimestampForExport(new Date().toISOString());
+
+  const transcriptItemsHtml = [];
+  for (const chunkText of chunkTexts) {
+    const rows = parseTranscriptDisplayRows(chunkText);
+    for (const row of rows) {
+      if (row.kind === "timed") {
+        const contentText = String(row.content || "").trim();
+        if (!contentText) {
+          continue;
+        }
+        const safeContent = escapeHtml(contentText).replace(/\r?\n/g, "<br>");
+        const safeSpeaker = escapeHtml(row.speaker || "");
+        transcriptItemsHtml.push(`
+          <article class="entry">
+            <div class="entry-rail">
+              <div class="entry-time"><span class="range">${escapeHtml(row.range || "")}</span></div>
+            </div>
+            <div class="entry-body">
+              <div class="entry-text">${
+                safeSpeaker
+                  ? `<span class="entry-speaker-inline">${safeSpeaker}</span><span class="entry-speaker-sep">:</span> `
+                  : ""
+              }${safeContent}</div>
+            </div>
+          </article>
+        `);
+        continue;
+      }
+      const raw = String(row.raw || "").trim();
+      if (!raw) {
+        continue;
+      }
+      const safeRaw = escapeHtml(raw).replace(/\r?\n/g, "<br>");
+      transcriptItemsHtml.push(`
+        <article class="entry entry-raw">
+          <div class="entry-body">${safeRaw}</div>
+        </article>
+      `);
+    }
+  }
+
+  const metaChips = [];
+  if (includeMeta) {
+    if (startedAt) {
+      metaChips.push(`<span class="chip"><strong>Started</strong> ${escapeHtml(startedAt)}</span>`);
+    }
+    if (endedAt) {
+      metaChips.push(`<span class="chip"><strong>Ended</strong> ${escapeHtml(endedAt)}</span>`);
+    }
+    metaChips.push(
+      `<span class="chip"><strong>Recorded</strong> ${escapeHtml(formatRecordedDurationForExport(recordedSeconds))}</span>`
+    );
+  }
+
+  const summaryHtml =
+    includeSummary && pdfSummaryText
+      ? `
+        <section class="section summary-section">
+          <div class="section-head">
+            <h2>Summary</h2>
+          </div>
+          <div class="summary">${renderMarkdownLiteToHtml(pdfSummaryText)}</div>
+        </section>
+      `
+      : "";
+  const transcriptSectionClass = summaryHtml
+    ? "section transcript-section transcript-section--new-page"
+    : "section transcript-section";
+  const exportedOnHtml =
+    includeMeta && exportedAt
+      ? `<div class="header-exported"><strong>Exported on</strong> ${escapeHtml(exportedAt)}</div>`
+      : "";
+
+  return `
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapeHtml(title)}</title>
+    <style>
+      :root { color-scheme: light; }
+      @page {
+        size: A4 portrait;
+        margin: 11mm 12mm 12mm;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        font-family: "Aptos", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        color: #10223d;
+        background: #ffffff;
+        line-height: 1.4;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      .page {
+        padding: 10px 0 0;
+      }
+      header {
+        border: 1px solid #dce7f6;
+        border-radius: 14px;
+        background:
+          linear-gradient(180deg, #f8fbff 0%, #fdfefe 100%);
+        padding: 14px 16px 12px;
+        margin-bottom: 14px;
+      }
+      .header-top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      h1 {
+        font-family: "Georgia", "Times New Roman", serif;
+        margin: 0 0 4px;
+        font-size: 22px;
+        letter-spacing: 0.01em;
+        word-break: break-word;
+        line-height: 1.15;
+      }
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        font-family: "Segoe UI", "Aptos", Arial, sans-serif;
+        font-size: 11.5px;
+        color: #33527d;
+      }
+      .brand-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 3px 8px 4px;
+        border: 1px solid #d6e4f7;
+        border-radius: 999px;
+        background: #ffffff;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        font-size: 11px;
+      }
+      .header-exported {
+        margin-top: 2px;
+        font-family: "Segoe UI", "Aptos", Arial, sans-serif;
+        font-size: 11px;
+        color: #5f789c;
+        text-align: right;
+        white-space: nowrap;
+      }
+      .header-exported strong {
+        color: #2d4f7f;
+        font-weight: 600;
+      }
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 10px;
+      }
+      .chip {
+        display: inline-flex;
+        gap: 6px;
+        align-items: baseline;
+        padding: 5px 9px;
+        border: 1px solid #dbe6f5;
+        border-radius: 10px;
+        background: #ffffff;
+        font-family: "Segoe UI", "Aptos", Arial, sans-serif;
+        font-size: 11.5px;
+        color: #2f4f7f;
+      }
+      .chip strong {
+        font-weight: 700;
+        color: #173a69;
+      }
+      .section { margin-top: 14px; }
+      .section-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: flex-start;
+        gap: 12px;
+        margin-bottom: 8px;
+      }
+      h2 {
+        margin: 0;
+        font-family: "Segoe UI", "Aptos", Arial, sans-serif;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: #355a8c;
+      }
+      .summary {
+        border: 1px solid #dce7f6;
+        border-radius: 12px;
+        background:
+          linear-gradient(180deg, #fbfdff 0%, #ffffff 100%);
+        padding: 12px 14px;
+        font-family: "Aptos", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        font-size: 12.5px;
+        line-height: 1.42;
+        color: #142845;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
+      }
+      .summary .md-gap { height: 7px; }
+      .summary .md-p { margin: 0; }
+      .summary .md-h3, .summary .md-h4, .summary .md-h5 {
+        margin: 10px 0 6px;
+        color: #173a69;
+        letter-spacing: 0.01em;
+        font-family: "Segoe UI", "Aptos", Arial, sans-serif;
+      }
+      .summary .md-h3 { font-size: 13.5px; text-transform: none; }
+      .summary .md-h4 { font-size: 12.5px; text-transform: none; }
+      .summary .md-h5 { font-size: 12px; text-transform: none; }
+      .summary .md-ul, .summary .md-ol {
+        margin: 8px 0 0 16px;
+        padding: 0;
+      }
+      .summary li { margin: 3px 0; }
+      .summary .md-h3:first-child,
+      .summary .md-h4:first-child,
+      .summary .md-h5:first-child {
+        margin-top: 0;
+      }
+      .summary code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+        font-size: 11px;
+        padding: 1px 5px;
+        border: 1px solid #d8e4f6;
+        border-radius: 8px;
+        background: #ffffff;
+      }
+      .transcript-frame {
+        background: #ffffff;
+      }
+      .transcript-head {
+        display: grid;
+        grid-template-columns: 170px minmax(0, 1fr);
+        gap: 0;
+        border-bottom: 1px solid #dce7f6;
+        background: linear-gradient(180deg, #f8fbff 0%, #f4f9ff 100%);
+        font-family: "Segoe UI", "Aptos", Arial, sans-serif;
+        color: #355a8c;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+      }
+      .transcript-head > div {
+        padding: 8px 10px;
+      }
+      .transcript-head > div:first-child {
+        border-right: 1px solid #e4edf9;
+      }
+      .transcript-list {
+        display: block;
+      }
+      .entry {
+        display: grid;
+        grid-template-columns: 170px minmax(0, 1fr);
+        gap: 0;
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+      .entry + .entry {
+        border-top: 1px solid #edf3fb;
+      }
+      .entry:nth-child(even) {
+        background: #fbfdff;
+      }
+      .entry-rail {
+        padding: 8px 10px;
+        border-right: 1px solid #edf3fb;
+        background:
+          linear-gradient(180deg, rgba(247,251,255,0.9) 0%, rgba(255,255,255,0.92) 100%);
+      }
+      .entry-time {
+        display: block;
+        width: 100%;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+        font-size: 11.25px;
+        color: #274a79;
+        line-height: 1.25;
+        white-space: nowrap;
+        letter-spacing: 0;
+      }
+      .range { font-variant-numeric: tabular-nums; }
+      .entry-speaker-inline {
+        font-family: inherit;
+        font-size: inherit;
+        line-height: inherit;
+        font-weight: 700;
+        letter-spacing: 0;
+        color: #173a69;
+        text-transform: none;
+        white-space: nowrap;
+      }
+      .entry-speaker-sep {
+        display: inline-block;
+        margin-right: 4px;
+        font-family: inherit;
+        font-size: inherit;
+        line-height: inherit;
+        font-weight: 700;
+        color: #406997;
+      }
+      .entry-body {
+        padding: 8px 12px;
+      }
+      .entry-text {
+        font-family: "Aptos", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        font-size: 12.4px;
+        line-height: 1.46;
+        color: #132744;
+        overflow-wrap: anywhere;
+        word-break: normal;
+        hyphens: auto;
+      }
+      .entry-raw {
+        grid-template-columns: minmax(0, 1fr);
+        background: #fffdf7;
+      }
+      .entry-raw .entry-body {
+        font-family: "Segoe UI", "Aptos", Arial, sans-serif;
+        font-size: 12px;
+        font-weight: 600;
+        color: #604d1a;
+        border-left: 3px solid #f2d38a;
+        margin: 8px 10px;
+        padding: 6px 10px;
+        background: #fffaf0;
+        border-radius: 8px;
+      }
+      .footer {
+        margin-top: 12px;
+        padding-top: 8px;
+        border-top: 1px solid #e8eef7;
+        font-family: "Segoe UI", "Aptos", Arial, sans-serif;
+        font-size: 11px;
+        color: #60789c;
+      }
+      @media print {
+        .page { padding: 6px 0 0; }
+        header {
+          page-break-inside: avoid;
+          break-inside: avoid;
+        }
+        .summary-section {
+          page-break-inside: avoid;
+          break-inside: avoid;
+        }
+        .summary {
+          page-break-inside: avoid;
+          break-inside: avoid;
+        }
+        .transcript-section--new-page {
+          page-break-before: always;
+          break-before: page;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header>
+        <div class="header-top">
+          <div class="brand">
+            <span class="brand-badge">ClipScribe</span>
+          </div>
+          ${exportedOnHtml}
+        </div>
+        <h1>${escapeHtml(title)}</h1>
+        ${metaChips.length ? `<div class="chips">${metaChips.join("")}</div>` : ""}
+      </header>
+
+      ${summaryHtml}
+
+      <section class="${transcriptSectionClass}">
+        <div class="section-head">
+          <h2>Transcript</h2>
+        </div>
+        <div class="transcript-frame">
+          <div class="transcript-head" aria-hidden="true">
+            <div>Time</div>
+            <div>Transcript</div>
+          </div>
+          <div class="transcript-list">
+            ${transcriptItemsHtml.join("")}
+          </div>
+        </div>
+      </section>
+
+      <div class="footer">Exported from ClipScribe Desktop</div>
+    </div>
+  </body>
+</html>
+  `.trim();
+}
+
+function buildSessionTranscriptExport(detail, options) {
+  const session = detail?.session || null;
+  if (!session) {
+    throw new Error("Session not found.");
+  }
+
+  const format = String(options?.format || "md").trim().toLowerCase();
+  const includeMeta = options?.include_meta !== false;
+  const includeSummary = Boolean(options?.include_summary);
+  const applyAliases = options?.apply_speaker_aliases !== false;
+
+  const aliasMap = buildSpeakerAliasMap(detail.events || []);
+  const chunkTexts = (detail.chunks || [])
+    .map((chunk) => {
+      const text = String(chunk?.text || "").trim();
+      if (!text) {
+        return null;
+      }
+      return applyAliases ? applySpeakerAliases(text, aliasMap) : text;
+    })
+    .filter(Boolean);
+
+  if (chunkTexts.length === 0) {
+    throw new Error("No transcript text available yet for this session.");
+  }
+
+  const title = String(session.title || "Untitled Session").trim() || "Untitled Session";
+  const startedAt = String(session.started_at || "").trim();
+  const endedAt = String(session.ended_at || "").trim();
+  const exportedAt = new Date().toISOString();
+
+  if (format === "pdf") {
+    const html = buildSessionTranscriptExportHtml(detail, options);
+    return { ext: "pdf", kind: "pdf", html };
+  }
+
+  if (format === "json") {
+    const payload = {
+      exported_at: exportedAt,
+      session: detail.session,
+      chunks: detail.chunks,
+      events: detail.events,
+      chat_messages: detail.chat_messages,
+      transcript_text: chunkTexts.join(os.EOL + os.EOL)
+    };
+    return { ext: "json", content: JSON.stringify(payload, null, 2) + os.EOL };
+  }
+
+  if (format === "txt") {
+    const headerLines = [];
+    if (includeMeta) {
+      headerLines.push(title);
+      if (startedAt) {
+        headerLines.push(`Started: ${startedAt}`);
+      }
+      if (endedAt) {
+        headerLines.push(`Ended: ${endedAt}`);
+      }
+      headerLines.push(`Exported: ${exportedAt}`);
+      headerLines.push("");
+    }
+    if (includeSummary) {
+      const summary = String(session.summary_text || "").trim();
+      if (summary) {
+        headerLines.push("Summary:");
+        headerLines.push(summary);
+        headerLines.push("");
+      }
+    }
+    return { ext: "txt", content: [...headerLines, ...chunkTexts].join(os.EOL + os.EOL) + os.EOL };
+  }
+
+  const lines = [];
+  lines.push(`# ${title}`);
+  if (includeMeta) {
+    lines.push("");
+    lines.push("- Export: ClipScribe Desktop");
+    if (startedAt) {
+      lines.push(`- Started: ${startedAt}`);
+    }
+    if (endedAt) {
+      lines.push(`- Ended: ${endedAt}`);
+    }
+    lines.push(`- Exported: ${exportedAt}`);
+  }
+
+  const summaryText = String(session.summary_text || "").trim();
+  if (includeSummary && summaryText) {
+    lines.push("");
+    lines.push("## Summary");
+    lines.push("");
+    lines.push(summaryText);
+  }
+
+  lines.push("");
+  lines.push("## Transcript");
+  lines.push("");
+  lines.push("| Time | Speaker | Text |");
+  lines.push("| --- | --- | --- |");
+
+  for (const chunkText of chunkTexts) {
+    const rows = parseTranscriptDisplayRows(chunkText);
+    for (const row of rows) {
+      if (row.kind === "timed") {
+        const content = String(row.content || "").trim();
+        if (!content) {
+          continue;
+        }
+        lines.push(
+          `| ${escapeMarkdownCell(row.range)} | ${escapeMarkdownCell(row.speaker)} | ${escapeMarkdownCell(content)} |`
+        );
+        continue;
+      }
+      const raw = String(row.raw || "").trim();
+      if (!raw) {
+        continue;
+      }
+      lines.push(`|  |  | ${escapeMarkdownCell(raw)} |`);
+    }
+  }
+
+  return { ext: "md", content: lines.join("\n") + "\n" };
+}
 
 function logStartup(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`;
@@ -411,6 +1291,27 @@ function registerIpc() {
     return updated;
   });
 
+  safeHandle("settings:pick-export-output-dir", async (event) => {
+    const dialogWindow = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+    const current = services.settingsService.getSettings();
+    const defaultPath = String(current.export_output_dir || current.storage_root || "").trim();
+    const result = await dialog.showOpenDialog(dialogWindow, {
+      title: "Choose Export Folder",
+      defaultPath: defaultPath || undefined,
+      properties: ["openDirectory", "createDirectory", "dontAddToRecent"]
+    });
+    if (result.canceled || !Array.isArray(result.filePaths) || result.filePaths.length === 0) {
+      return { ok: false, canceled: true };
+    }
+    const picked = String(result.filePaths[0] || "").trim();
+    if (!picked) {
+      return { ok: false, canceled: true };
+    }
+    const updated = services.settingsService.updateSettings({ export_output_dir: picked });
+    sendUpdate("app:global-updated", { at: new Date().toISOString() });
+    return { ok: true, settings: updated };
+  });
+
   safeHandle("app:repair-native", async () => {
     return runRepairNative();
   });
@@ -557,6 +1458,196 @@ function registerIpc() {
 
   safeHandle("sessions:detail", async (_, sessionId) => {
     return services.recordingService.getSessionDetail(sessionId);
+  });
+
+  safeHandle("sessions:export-transcript", async (event, payload) => {
+    const sessionId = String(payload?.sessionId || "").trim();
+    if (!sessionId) {
+      throw new Error("sessionId is required.");
+    }
+    const options = payload?.options && typeof payload.options === "object" ? payload.options : {};
+
+    const detail = services.recordingService.getSessionDetail(sessionId);
+    const session = detail?.session || null;
+    if (!session) {
+      throw new Error("Session not found.");
+    }
+
+    const settings = services.settingsService.getSettings();
+    const combinedOptions = {
+      format: options.format ?? settings.export_format,
+      include_meta: options.include_meta ?? settings.export_include_meta,
+      include_summary: options.include_summary ?? settings.export_include_summary,
+      apply_speaker_aliases:
+        options.apply_speaker_aliases ?? settings.export_apply_speaker_aliases,
+      output_dir: options.output_dir ?? settings.export_output_dir
+    };
+
+    const built = buildSessionTranscriptExport(detail, combinedOptions);
+    const ext = String(built?.ext || "md").replace(/^\./, "") || "md";
+    const dialogWindow = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+
+    const startedDate = String(session.started_at || "")
+      .slice(0, 10)
+      .replace(/[^0-9-]/g, "");
+    const stem = sanitizeExportFileStem(session.title || "session");
+    const suggestedName = startedDate
+      ? `${stem} - ${startedDate} - transcript.${ext}`
+      : `${stem} - transcript.${ext}`;
+    const outputDir = String(combinedOptions.output_dir || "").trim();
+
+    const filters = (() => {
+      if (ext === "txt") {
+        return [{ name: "Text", extensions: ["txt"] }];
+      }
+      if (ext === "pdf") {
+        return [{ name: "PDF", extensions: ["pdf"] }];
+      }
+      if (ext === "json") {
+        return [{ name: "JSON", extensions: ["json"] }];
+      }
+      return [{ name: "Markdown", extensions: ["md"] }];
+    })();
+
+    if (outputDir) {
+      fs.mkdirSync(outputDir, { recursive: true });
+      let outPath = ensureUniquePath(path.join(outputDir, suggestedName));
+      if (!path.extname(outPath)) {
+        outPath = `${outPath}.${ext}`;
+      }
+
+      if (built?.kind === "pdf") {
+        const html = String(built?.html || "").trim();
+        if (!html) {
+          throw new Error("Missing PDF content.");
+        }
+
+        const tmpFileName = `clipscribe-export-${Date.now()}-${process.pid}-${Math.floor(Math.random() * 1e9)}.html`;
+        const tmpPath = path.join(os.tmpdir(), tmpFileName);
+        fs.writeFileSync(tmpPath, html, "utf8");
+
+        const exportWindow = new BrowserWindow({
+          show: false,
+          width: 1100,
+          height: 800,
+          backgroundColor: "#ffffff",
+          webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: false
+          }
+        });
+
+        try {
+          await exportWindow.loadFile(tmpPath);
+          const pdfBuffer = await exportWindow.webContents.printToPDF({
+            printBackground: true,
+            preferCSSPageSize: true,
+            margins: {
+              top: 0.6,
+              bottom: 0.7,
+              left: 0.6,
+              right: 0.6
+            }
+          });
+          fs.writeFileSync(outPath, pdfBuffer);
+        } finally {
+          try {
+            exportWindow.destroy();
+          } catch (_) {
+            // ignore window teardown failures
+          }
+          try {
+            if (fs.existsSync(tmpPath)) {
+              fs.unlinkSync(tmpPath);
+            }
+          } catch (_) {
+            // ignore temp cleanup failures
+          }
+        }
+      } else {
+        fs.writeFileSync(outPath, String(built.content || ""), "utf8");
+      }
+
+      return { ok: true, path: outPath, used_default_dir: true };
+    }
+
+    const defaultDir = String(session.session_dir || "").trim() || settings.storage_root || process.cwd();
+    const defaultPath = path.join(defaultDir, suggestedName);
+
+    const result = await dialog.showSaveDialog(dialogWindow, {
+      title: "Export Transcript",
+      defaultPath,
+      filters
+    });
+
+    if (result.canceled || !result.filePath) {
+      return { ok: false, canceled: true };
+    }
+
+    let outPath = String(result.filePath || "").trim();
+    if (!outPath) {
+      return { ok: false, canceled: true };
+    }
+    if (!path.extname(outPath)) {
+      outPath = `${outPath}.${ext}`;
+    }
+
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+
+    if (built?.kind === "pdf") {
+      const html = String(built?.html || "").trim();
+      if (!html) {
+        throw new Error("Missing PDF content.");
+      }
+
+      const tmpFileName = `clipscribe-export-${Date.now()}-${process.pid}-${Math.floor(Math.random() * 1e9)}.html`;
+      const tmpPath = path.join(os.tmpdir(), tmpFileName);
+      fs.writeFileSync(tmpPath, html, "utf8");
+
+      const exportWindow = new BrowserWindow({
+        show: false,
+        width: 1100,
+        height: 800,
+        backgroundColor: "#ffffff",
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: false
+        }
+      });
+
+      try {
+        await exportWindow.loadFile(tmpPath);
+        const pdfBuffer = await exportWindow.webContents.printToPDF({
+          printBackground: true,
+          preferCSSPageSize: true,
+          margins: {
+            top: 0.6,
+            bottom: 0.7,
+            left: 0.6,
+            right: 0.6
+          }
+        });
+        fs.writeFileSync(outPath, pdfBuffer);
+      } finally {
+        try {
+          exportWindow.destroy();
+        } catch (_) {
+          // ignore window teardown failures
+        }
+        try {
+          if (fs.existsSync(tmpPath)) {
+            fs.unlinkSync(tmpPath);
+          }
+        } catch (_) {
+          // ignore temp cleanup failures
+        }
+      }
+    } else {
+      fs.writeFileSync(outPath, String(built.content || ""), "utf8");
+    }
+    return { ok: true, path: outPath };
   });
 
   safeHandle("sessions:get", async (_, sessionId) => {
