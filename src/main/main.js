@@ -80,7 +80,10 @@ function parseTranscriptDisplayRows(text) {
 }
 
 function buildSpeakerAliasMap(events) {
-  const aliasMap = {};
+  const aliasMap = {
+    bySpeakerId: {},
+    byTrackSpeaker: {}
+  };
   for (const event of events || []) {
     if (String(event?.event_type || "") !== "speaker_alias") {
       continue;
@@ -90,16 +93,26 @@ function buildSpeakerAliasMap(events) {
       continue;
     }
     const alias = String(event?.payload?.alias || "").trim();
+    const trackId = String(event?.payload?.track_id || "").trim();
+    const scopedKey = trackId ? `${trackId}:${speakerId}` : "";
+    if (scopedKey) {
+      if (!alias) {
+        delete aliasMap.byTrackSpeaker[scopedKey];
+      } else {
+        aliasMap.byTrackSpeaker[scopedKey] = alias;
+      }
+      continue;
+    }
     if (!alias) {
-      delete aliasMap[speakerId];
+      delete aliasMap.bySpeakerId[speakerId];
     } else {
-      aliasMap[speakerId] = alias;
+      aliasMap.bySpeakerId[speakerId] = alias;
     }
   }
   return aliasMap;
 }
 
-function applySpeakerAliases(text, aliasMap) {
+function applySpeakerAliases(text, aliasMap, trackId = "") {
   const source = String(text || "");
   if (!source) {
     return "";
@@ -109,7 +122,13 @@ function applySpeakerAliases(text, aliasMap) {
     if (!Number.isInteger(speakerId) || speakerId < 0) {
       return full;
     }
-    const alias = String(aliasMap?.[speakerId] || "").trim();
+    const scopedKey = trackId ? `${trackId}:${speakerId}` : "";
+    const alias = String(
+      (scopedKey && aliasMap?.byTrackSpeaker?.[scopedKey]) ||
+      aliasMap?.bySpeakerId?.[speakerId] ||
+      aliasMap?.[speakerId] ||
+      ""
+    ).trim();
     return alias ? `${alias}:` : full;
   });
 }
@@ -343,15 +362,18 @@ function buildSessionTranscriptExportHtml(detail, options) {
   const includeMeta = options?.include_meta !== false;
   const includeSummary = Boolean(options?.include_summary);
   const applyAliases = options?.apply_speaker_aliases !== false;
+  const transcriptChunks = (applyAliases
+    ? (detail.chunks || [])
+    : (detail.chunks_unaliased || detail.chunks || []));
 
   const aliasMap = buildSpeakerAliasMap(detail.events || []);
-  const chunkTexts = (detail.chunks || [])
+  const chunkTexts = transcriptChunks
     .map((chunk) => {
       const text = String(chunk?.text || "").trim();
       if (!text) {
         return null;
       }
-      return applyAliases ? applySpeakerAliases(text, aliasMap) : text;
+      return applyAliases ? applySpeakerAliases(text, aliasMap, String(chunk?.track_id || "")) : text;
     })
     .filter(Boolean);
 
@@ -775,15 +797,18 @@ function buildSessionTranscriptExport(detail, options) {
   const includeMeta = options?.include_meta !== false;
   const includeSummary = Boolean(options?.include_summary);
   const applyAliases = options?.apply_speaker_aliases !== false;
+  const transcriptChunks = (applyAliases
+    ? (detail.chunks || [])
+    : (detail.chunks_unaliased || detail.chunks || []));
 
   const aliasMap = buildSpeakerAliasMap(detail.events || []);
-  const chunkTexts = (detail.chunks || [])
+  const chunkTexts = transcriptChunks
     .map((chunk) => {
       const text = String(chunk?.text || "").trim();
       if (!text) {
         return null;
       }
-      return applyAliases ? applySpeakerAliases(text, aliasMap) : text;
+      return applyAliases ? applySpeakerAliases(text, aliasMap, String(chunk?.track_id || "")) : text;
     })
     .filter(Boolean);
 
@@ -1674,8 +1699,8 @@ function registerIpc() {
     return services.recordingService.askSessionChat(sessionId, question);
   });
 
-  safeHandle("sessions:set-speaker-alias", async (_, { sessionId, speakerId, alias }) => {
-    return services.recordingService.setSpeakerAlias(sessionId, speakerId, alias);
+  safeHandle("sessions:set-speaker-alias", async (_, { sessionId, speakerId, alias, trackId }) => {
+    return services.recordingService.setSpeakerAlias(sessionId, speakerId, alias, trackId);
   });
 
   safeHandle("sessions:delete", async (_, sessionId) => {
@@ -1704,6 +1729,24 @@ function registerIpc() {
     const resolved = path.resolve(targetPath);
     const raw = fs.readFileSync(resolved);
     return raw.toString("base64");
+  });
+
+  safeHandle("files:reveal-in-folder", async (_, filePath) => {
+    const targetPath = String(filePath || "").trim();
+    if (!targetPath) {
+      throw new Error("File path is required.");
+    }
+    const resolved = path.resolve(targetPath);
+    if (fs.existsSync(resolved)) {
+      shell.showItemInFolder(resolved);
+      return { ok: true };
+    }
+    const folderPath = path.dirname(resolved);
+    const openError = await shell.openPath(folderPath);
+    if (openError) {
+      throw new Error(openError);
+    }
+    return { ok: true };
   });
 }
 

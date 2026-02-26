@@ -19,7 +19,13 @@ const DEFAULT_SETTINGS = Object.freeze({
   audio_test_output_device: "",
   transcription_preprocess_profile: "fast",
   transcription_preprocess_timeout_ms: 5000,
-  estimated_stt_usd_per_min: 0.0043
+  estimated_stt_usd_per_min: 0.0043,
+
+  export_format: "pdf",
+  export_include_meta: true,
+  export_include_summary: true,
+  export_apply_speaker_aliases: true,
+  export_output_dir: ""
 });
 
 function loadJson(filePath) {
@@ -91,6 +97,19 @@ function createSettingsService({ settingsPath, fallbackStorageRoot }) {
       next.openrouter_model = incomingModel;
     }
     next.openrouter_api_key = String(next.openrouter_api_key || "").trim();
+
+    const allowedExportFormats = new Set(["md", "txt", "json", "pdf"]);
+    const normalizedExportFormat = String(next.export_format || "").trim().toLowerCase();
+    next.export_format = allowedExportFormats.has(normalizedExportFormat)
+      ? normalizedExportFormat
+      : "pdf";
+    next.export_include_meta = next.export_include_meta !== false;
+    next.export_include_summary = next.export_include_summary !== false;
+    next.export_apply_speaker_aliases = next.export_apply_speaker_aliases !== false;
+    next.export_output_dir = String(next.export_output_dir || "").trim();
+    if (next.export_output_dir) {
+      fs.mkdirSync(next.export_output_dir, { recursive: true });
+    }
 
     fs.mkdirSync(next.storage_root, { recursive: true });
     fs.writeFileSync(settingsPath, JSON.stringify(next, null, 2), "utf8");

@@ -171,10 +171,18 @@ function createTranscriptionWorker({
         retryCount: chunk.retry_count
       });
       if (!text) {
-        repo.addEvent(chunk.session_id, "warning", chunk.end_sec || 0, {
+        const sourceLabel = String(chunk.source_label || "").trim();
+        const trackLabel = sourceLabel || String(chunk.track_id || "").trim() || "selected source";
+        const warningAtSec = Math.max(
+          Number(chunk.start_sec || 0),
+          Number(chunk.start_sec || 0) + Number(meta.duration_sec || 0)
+        );
+        repo.addEvent(chunk.session_id, "warning", warningAtSec, {
           code: "no_speech_detected",
+          track_id: String(chunk.track_id || "").trim() || null,
+          source_label: sourceLabel || null,
           message:
-            "Deepgram returned no speech for this chunk. Confirm the selected source is carrying spoken voice."
+            `Deepgram returned no speech for this chunk (${trackLabel}). Confirm that source is carrying spoken voice/audio.`
         });
       }
     } catch (error) {

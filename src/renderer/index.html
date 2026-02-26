@@ -14,7 +14,7 @@
           <h1>ClipScribe</h1>
           <span class="sidebar-badge">Desktop</span>
         </div>
-        <p class="sidebar-subtitle">Project folders and session history.</p>
+        <p class="sidebar-subtitle">Folders and session history.</p>
 
         <section class="sidebar-section">
           <div class="sidebar-section-head">
@@ -28,14 +28,19 @@
           </div>
           <div id="folder-list" class="folder-list"></div>
         </section>
+
+        <div class="sidebar-spacer" aria-hidden="true"></div>
+        <div class="sidebar-footer">
+          <button id="sidebar-settings-btn" class="sidebar-settings-btn" type="button">Settings</button>
+        </div>
       </aside>
 
       <main id="main-workspace" class="workspace">
         <header class="topbar panel">
           <div>
-            <h2 id="workspace-title">Meeting Capture Workspace</h2>
+            <h2 id="workspace-title">New Session</h2>
             <p id="workspace-subtitle" class="muted">
-              Capture meeting and call audio, then review timestamped transcript chunks for notes, docs, or AI workflows.
+              Pick sources, set session options, and start recording.
             </p>
           </div>
           <div class="topbar-right">
@@ -43,16 +48,16 @@
           </div>
         </header>
 
-        <nav class="workspace-tabs panel" role="tablist" aria-label="Workspace Views">
-          <button id="nav-capture-btn" class="workspace-tab active" role="tab" aria-selected="true" aria-controls="capture-view" type="button">Capture</button>
+        <nav class="workspace-tabs panel hidden" role="tablist" aria-label="Workspace Views" aria-hidden="true">
+          <button id="nav-capture-btn" class="workspace-tab active" role="tab" aria-selected="true" aria-controls="capture-view" type="button">Record</button>
           <button id="nav-settings-btn" class="workspace-tab" role="tab" aria-selected="false" aria-controls="settings-view" type="button">Settings</button>
         </nav>
 
-        <div id="shortcut-hints" class="shortcut-strip panel">Shortcuts: <kbd>Esc</kbd> pause/resume, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> start/stop, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copy transcript</div>
+        <div id="shortcut-hints" class="shortcut-strip panel">Shortcuts: <kbd>Esc</kbd> pause/resume, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> start/stop, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copy transcript, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> export transcript</div>
 
         <section id="capture-view" class="view">
           <nav class="subtabs panel" role="tablist" aria-label="Capture Sections">
-            <button id="capture-tab-setup" class="subtab active" role="tab" aria-selected="true" aria-controls="capture-setup-panel" type="button">Setup</button>
+            <button id="capture-tab-setup" class="subtab active" role="tab" aria-selected="true" aria-controls="capture-setup-panel" type="button">New Session</button>
             <button id="capture-tab-sessions" class="subtab" role="tab" aria-selected="false" aria-controls="capture-sessions-panel" type="button">Sessions</button>
             <button id="capture-tab-transcript" class="subtab" role="tab" aria-selected="false" aria-controls="capture-transcript-panel" type="button">Transcript</button>
           </nav>
@@ -61,12 +66,14 @@
             <section class="panel controls-panel">
               <div class="panel-title-row setup-title-row">
                 <div class="setup-title-stack">
-                  <h3>Session Setup</h3>
-                  <p class="panel-intro">Create a session, choose sources, then start capture and monitor live transcript chunks.</p>
+                  <h3>New Session</h3>
+                  <p class="panel-intro">Create a session and start recording. Sources come from Settings > Sources.</p>
                 </div>
-                <span id="session-folder-context" class="muted setup-folder-context">Folder: -</span>
+                <div class="setup-title-actions">
+                  <button id="start-from-setup-btn" class="accent" type="button">Start Recording</button>
+                </div>
               </div>
-              <div class="flow-steps" aria-label="Capture flow">
+              <div class="flow-steps hidden" aria-label="Capture flow">
                 <span id="flow-step-session" class="flow-step active">
                   <span class="flow-step-index">1</span>
                   <span>Session Details</span>
@@ -83,30 +90,36 @@
               <section class="setup-block">
                 <div class="setup-block-head">
                   <h4>Session Details</h4>
-                  <span class="muted">Saved when you start recording</span>
                 </div>
                 <div class="grid-row">
                   <label>
                     Session Title
-                    <input id="session-title" name="session_title" type="text" autocomplete="off" placeholder="Meeting - Product Sync..." />
+                    <input id="session-title" name="session_title" type="text" autocomplete="off" placeholder="Product Sync" />
                   </label>
                   <label>
-                    Chunk Interval (Sec)
+                    Chunk Interval (Sec, Session)
                     <input id="chunk-seconds" name="chunk_seconds" type="number" min="30" step="30" value="120" />
                   </label>
                 </div>
               </section>
 
               <section class="setup-block">
+                <div class="setup-block-head">
+                  <h4>Sources</h4>
+                  <span class="muted">Managed in Settings</span>
+                </div>
+                <div id="selected-sources-summary" class="selected-sources-summary"></div>
+              </section>
+
+              <section class="setup-block hidden" aria-hidden="true">
                 <div class="source-header">
                   <h4>Sources</h4>
                   <div class="actions compact-actions">
                     <button id="source-picker-toggle">Pick Sources</button>
                     <button id="test-selected-source-btn">Test Selected</button>
-                    <button id="refresh-sources-btn">Refresh</button>
+                    <button id="refresh-sources-btn">Refresh Sources</button>
                   </div>
                 </div>
-                <div id="selected-sources-summary" class="selected-sources-summary"></div>
                 <div id="source-picker-panel" class="source-picker-panel hidden">
                   <input id="source-search" class="source-search" type="text" autocomplete="off" placeholder="Search sources..." />
                   <div id="source-filter-pills" class="source-filter-pills">
@@ -120,10 +133,9 @@
                 </div>
                 <div class="setup-actions-row">
                   <div class="actions compact-actions source-apply-row">
-                    <button id="start-from-setup-btn" class="accent">Start & Open Transcript</button>
-                    <button id="apply-sources-btn">Apply Source Changes</button>
+                    <button id="apply-sources-btn">Update Sources</button>
                   </div>
-                  <p id="setup-action-hint" class="panel-note muted">Apply Source Changes is available only while a recording is active.</p>
+                  <p id="setup-action-hint" class="panel-note muted hidden"></p>
                 </div>
                 <div id="source-test-feedback" class="source-test-feedback hidden">
                   <div class="source-test-summary">
@@ -141,15 +153,17 @@
 
           <section id="capture-sessions-panel" class="capture-pane hidden">
             <section class="panel sessions-panel">
-              <div class="panel-title-row">
-                <h3 id="sessions-heading">Sessions</h3>
+              <div class="panel-title-row sessions-title-row">
+                <div class="sessions-title-stack">
+                  <h3 id="sessions-heading">Sessions</h3>
+                  <p class="panel-intro">Open a saved session and continue in Transcript.</p>
+                </div>
                 <div class="actions compact-actions session-actions">
                   <button id="open-transcript-btn">Open Transcript</button>
                   <button id="rename-session-btn">Rename</button>
                   <button id="delete-session-btn" class="danger">Delete</button>
                 </div>
               </div>
-              <p class="panel-intro">Search, rename, delete, and open session transcripts from this folder.</p>
               <div class="session-filter-row">
                 <input id="sessions-search" type="text" autocomplete="off" placeholder="Search sessions..." />
                 <select id="sessions-status-filter">
@@ -163,33 +177,41 @@
           </section>
 
           <section id="capture-transcript-panel" class="capture-pane hidden">
-            <section class="panel detail-panel">
-              <div class="panel-title-row">
-                <h3>Transcript</h3>
-                <div class="detail-head-actions">
-                  <button id="copy-all-btn">Copy Transcript</button>
-                  <div id="detail-meta" class="muted"></div>
+            <section class="panel capture-workbar" aria-label="Session Actions">
+              <div class="capture-workbar-group">
+                <div class="actions compact-actions transport-inline">
+                  <button id="pause-btn">Pause</button>
+                  <button id="resume-btn">Resume</button>
+                  <button id="stop-btn" class="danger">Stop</button>
                 </div>
               </div>
-              <div class="actions compact-actions transport-inline">
-                <button id="record-btn" class="accent">Start</button>
-                <button id="pause-btn">Pause</button>
-                <button id="resume-btn">Resume</button>
-                <button id="stop-btn" class="danger">Stop</button>
+              <div class="capture-workbar-group capture-workbar-group-right">
+                <div class="detail-head-actions">
+                  <button id="copy-all-btn">Copy Transcript</button>
+                  <button id="export-transcript-btn" type="button">Export</button>
+                </div>
+              </div>
+            </section>
+            <section class="panel detail-panel">
+              <div class="panel-title-row detail-title-row">
+                <div class="detail-title-stack">
+                  <h3>Transcript</h3>
+                  <div class="detail-panel-note muted">Transcript, summary, chat, and timeline for this session.</div>
+                </div>
+                <div id="detail-meta" class="muted"></div>
               </div>
               <div id="detail-estimate" class="detail-estimate"></div>
               <div id="detail-speakers" class="speaker-alias-panel hidden"></div>
               <nav class="detail-subtabs" role="tablist" aria-label="Transcript Detail Views">
                 <button
-                  id="detail-tab-timeline"
+                  id="detail-tab-transcript"
                   class="detail-subtab active"
                   role="tab"
                   aria-selected="true"
-                  aria-controls="detail-events-pane"
+                  aria-controls="detail-transcript-pane"
                   type="button"
                 >
-                  <span class="detail-subtab-label">Timeline</span>
-                  <span id="detail-tab-timeline-count" class="detail-tab-count hidden">0</span>
+                  Transcript
                 </button>
                 <button
                   id="detail-tab-summary"
@@ -202,16 +224,6 @@
                   Summary
                 </button>
                 <button
-                  id="detail-tab-transcript"
-                  class="detail-subtab"
-                  role="tab"
-                  aria-selected="false"
-                  aria-controls="detail-transcript-pane"
-                  type="button"
-                >
-                  Transcript
-                </button>
-                <button
                   id="detail-tab-chat"
                   class="detail-subtab"
                   role="tab"
@@ -221,8 +233,19 @@
                 >
                   Chat
                 </button>
+                <button
+                  id="detail-tab-timeline"
+                  class="detail-subtab"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="detail-events-pane"
+                  type="button"
+                >
+                  <span class="detail-subtab-label">Timeline</span>
+                  <span id="detail-tab-timeline-count" class="detail-tab-count hidden">0</span>
+                </button>
               </nav>
-              <section id="detail-transcript-pane" class="detail-pane hidden">
+              <section id="detail-transcript-pane" class="detail-pane">
                 <div id="detail-chunks" class="chunks-list"></div>
               </section>
               <section id="detail-summary-pane" class="detail-pane hidden">
@@ -249,16 +272,16 @@
                     <textarea
                       id="detail-chat-input"
                       rows="3"
-                      placeholder="Ask about this session transcript..."
+                      placeholder="Ask this transcript..."
                     ></textarea>
                     <div class="actions compact-actions">
-                      <button id="detail-chat-send-btn" class="accent">Ask Transcript</button>
+                      <button id="detail-chat-send-btn" class="accent">Ask</button>
                     </div>
                   </div>
                   <div id="detail-chat-citation-preview" class="chat-citation-preview hidden"></div>
                 </section>
               </section>
-              <section id="detail-events-pane" class="detail-pane">
+              <section id="detail-events-pane" class="detail-pane hidden">
                 <div id="detail-events" class="events-list timeline-list"></div>
               </section>
             </section>
@@ -267,21 +290,24 @@
 
         <section id="settings-view" class="view hidden">
           <nav class="subtabs panel" role="tablist" aria-label="Settings Sections">
-            <button id="settings-tab-health" class="subtab active" role="tab" aria-selected="true" aria-controls="settings-health-panel" type="button">Setup Health</button>
-            <button id="settings-tab-defaults" class="subtab" role="tab" aria-selected="false" aria-controls="settings-defaults-panel" type="button">Default Sources</button>
+            <button id="settings-tab-defaults" class="subtab active" role="tab" aria-selected="true" aria-controls="settings-defaults-panel" type="button">Sources</button>
             <button id="settings-tab-transcription" class="subtab" role="tab" aria-selected="false" aria-controls="settings-transcription-panel" type="button">Transcription</button>
+            <button id="settings-tab-export" class="subtab" role="tab" aria-selected="false" aria-controls="settings-export-panel" type="button">Export</button>
+            <button id="settings-tab-health" class="subtab" role="tab" aria-selected="false" aria-controls="settings-health-panel" type="button">Health</button>
           </nav>
 
-          <section id="settings-health-panel" class="settings-pane">
+          <section id="settings-health-panel" class="settings-pane hidden">
             <section class="panel health-panel">
-              <div class="panel-title-row health-title-row">
-                <h3>Setup Health</h3>
+              <div class="panel-title-row settings-page-head health-title-row">
+                <div class="settings-page-title">
+                  <h3>Health</h3>
+                  <p class="panel-intro">Use these tools when setup health reports an issue. If repair fails, close ClipScribe and run <code>npm run rebuild:native</code>.</p>
+                </div>
               </div>
-              <p class="panel-intro">Use these maintenance actions when any health card reports an issue. If repair fails, close ClipScribe and run <code>npm run rebuild:native</code>.</p>
               <div class="health-actions-card">
                 <div class="health-actions-head">
                   <p class="health-actions-title">Maintenance Actions</p>
-                  <span class="muted">Run left to right</span>
+                  <span class="muted">Run as needed</span>
                 </div>
                 <div class="actions health-actions">
                   <button id="detect-ffmpeg-btn">1. Auto-Detect FFmpeg Paths</button>
@@ -298,15 +324,17 @@
             </section>
           </section>
 
-          <section id="settings-defaults-panel" class="settings-pane hidden">
+          <section id="settings-defaults-panel" class="settings-pane">
             <section class="panel settings-panel">
-              <div class="panel-title-row">
-                <h3>Default Sources</h3>
-                <button id="save-default-sources-btn">Save Defaults</button>
+              <div class="panel-title-row settings-page-head">
+                <div class="settings-page-title">
+                  <h3>Sources</h3>
+                  <p class="panel-intro">Pre-selected when you start a new session. Use Test before saving.</p>
+                </div>
+                <div class="actions compact-actions settings-page-actions">
+                  <button id="save-default-sources-btn" class="settings-save-btn">Save Defaults</button>
+                </div>
               </div>
-              <p class="muted">
-                These are pre-selected when you start a new session. Use `Test` to verify before saving.
-              </p>
               <input id="default-source-search" class="source-search" type="text" autocomplete="off" placeholder="Search default sources..." />
               <div id="default-source-list" class="source-list"></div>
             </section>
@@ -314,12 +342,17 @@
 
           <section id="settings-transcription-panel" class="settings-pane hidden">
             <section class="panel transcription-panel">
-              <div class="panel-title-row">
-                <h3>Transcription Settings</h3>
+              <div class="panel-title-row settings-page-head">
+                <div class="settings-page-title">
+                  <h3>Transcription</h3>
+                  <p class="panel-intro">
+                    Configure transcription and summary defaults. ClipScribe uses batch transcription (not realtime).
+                  </p>
+                </div>
+                <div class="actions compact-actions settings-page-actions">
+                  <button id="save-settings-btn" class="settings-save-btn">Save Transcription Settings</button>
+                </div>
               </div>
-              <p class="panel-intro">
-                Configure pre-recorded STT and summary defaults. ClipScribe uses batch transcription (not realtime streaming).
-              </p>
               <nav class="transcription-subtabs" role="tablist" aria-label="Transcription Sections">
                 <button
                   id="transcription-tab-providers"
@@ -439,9 +472,6 @@
                     </div>
                   </section>
                 </div>
-                <div class="actions transcription-save-row">
-                  <button id="save-settings-btn">Save Transcription Settings</button>
-                </div>
               </section>
 
               <section id="transcription-usage-pane" class="transcription-pane hidden">
@@ -452,7 +482,7 @@
                       <button id="refresh-usage-btn" type="button">Refresh Deepgram</button>
                     </div>
                     <p class="panel-intro">
-                      Endpoint: <code>listen</code>. Optional grouping by model/method/tag/deployment/accessor/endpoint.
+                      Endpoint <code>listen</code> with optional grouping by model, method, tag, deployment, accessor, or endpoint.
                     </p>
                     <div class="usage-filter-row">
                       <label>
@@ -490,7 +520,7 @@
                       </div>
                     </div>
                     <p class="panel-intro">
-                      Key-level credits and rate-limit snapshot for summary generation.
+                      Key credits and rate-limit snapshot for summary generation.
                     </p>
                     <p id="openrouter-raw-log-hint" class="panel-note muted"></p>
                     <div id="openrouter-usage-summary" class="usage-summary"></div>
@@ -498,6 +528,128 @@
                   </div>
                 </div>
               </section>
+              </section>
+            </section>
+
+          <section id="settings-export-panel" class="settings-pane hidden">
+            <section class="panel settings-panel export-panel">
+              <div class="panel-title-row settings-page-head export-page-head">
+                <div class="settings-page-title export-page-title">
+                  <h3>Export</h3>
+                  <p class="panel-intro">
+                    Configure the Transcript <strong>Export</strong> button. Set a save folder for one-click exports, or leave it empty to choose a location each time.
+                  </p>
+                </div>
+                <div class="actions compact-actions settings-page-actions export-page-actions">
+                  <button id="save-export-settings-btn" class="settings-save-btn">Save Export Settings</button>
+                </div>
+              </div>
+
+              <div class="export-settings-grid">
+                <section class="export-card export-card-span">
+                  <div class="export-card-head">
+                    <h4>Save Location</h4>
+                    <span class="muted">Optional</span>
+                  </div>
+                  <p class="export-card-note">If set, Export saves immediately without showing a file dialog.</p>
+                  <div class="export-location">
+                    <label class="export-location-label" for="export-output-dir">
+                      Folder
+                      <span class="muted export-location-hint">Used for one-click exports.</span>
+                    </label>
+                    <div class="export-location-row">
+                      <input
+                        id="export-output-dir"
+                        name="export_output_dir"
+                        type="text"
+                        spellcheck="false"
+                        autocomplete="off"
+                        readonly
+                        placeholder="Choose a folder..."
+                      />
+                      <button id="pick-export-output-dir-btn" type="button">Choose Folder...</button>
+                      <button id="clear-export-output-dir-btn" type="button">Clear Folder</button>
+                    </div>
+                    <p class="muted export-location-note">
+                      If empty, Export asks where to save each time.
+                    </p>
+                    <div class="export-preview" aria-live="polite">
+                      <span class="export-preview-label">Filename preview</span>
+                      <code id="export-filename-preview" class="export-preview-value"></code>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="export-card">
+                  <div class="export-card-head">
+                    <h4>Format</h4>
+                  </div>
+                  <p class="export-card-note">Default file type for the Transcript Export button.</p>
+                  <div class="export-format-grid" role="radiogroup" aria-label="Export format">
+                    <label class="export-option">
+                      <input id="export-format-pdf" name="export_format" type="radio" value="pdf" />
+                      <span class="export-option-copy">
+                        <span class="export-option-title">PDF</span>
+                        <span class="export-option-desc">Best for sharing and printing.</span>
+                      </span>
+                    </label>
+                    <label class="export-option">
+                      <input id="export-format-md" name="export_format" type="radio" value="md" />
+                      <span class="export-option-copy">
+                        <span class="export-option-title">Markdown</span>
+                        <span class="export-option-desc">Clean table format for docs.</span>
+                      </span>
+                    </label>
+                    <label class="export-option">
+                      <input id="export-format-txt" name="export_format" type="radio" value="txt" />
+                      <span class="export-option-copy">
+                        <span class="export-option-title">Text</span>
+                        <span class="export-option-desc">Plain text for quick copy/paste.</span>
+                      </span>
+                    </label>
+                    <label class="export-option">
+                      <input id="export-format-json" name="export_format" type="radio" value="json" />
+                      <span class="export-option-copy">
+                        <span class="export-option-title">JSON</span>
+                        <span class="export-option-desc">Includes full session detail payload.</span>
+                      </span>
+                    </label>
+                  </div>
+                </section>
+
+                <section class="export-card">
+                  <div class="export-card-head">
+                    <h4>Content Options</h4>
+                  </div>
+                  <p class="export-card-note">Choose what the export should include by default.</p>
+                  <div class="export-options-grid">
+                    <label class="export-toggle">
+                      <input id="export-include-meta" name="export_include_meta" type="checkbox" checked />
+                      <span class="export-toggle-copy">
+                        <span class="export-toggle-title">Include Metadata</span>
+                        <span class="export-toggle-desc">Session title, timestamps, and stats.</span>
+                      </span>
+                    </label>
+                    <label class="export-toggle">
+                      <input id="export-include-summary" name="export_include_summary" type="checkbox" checked />
+                      <span class="export-toggle-copy">
+                        <span class="export-toggle-title">Include Summary</span>
+                        <span class="export-toggle-desc">Exports summary text when available.</span>
+                      </span>
+                    </label>
+                    <label class="export-toggle">
+                      <input id="export-apply-aliases" name="export_apply_speaker_aliases" type="checkbox" checked />
+                      <span class="export-toggle-copy">
+                        <span class="export-toggle-title">Apply Speaker Aliases</span>
+                        <span class="export-toggle-desc">Replace "Speaker 0" labels with your aliases.</span>
+                      </span>
+                    </label>
+                  </div>
+                  <p class="muted export-note">
+                    JSON always includes metadata and summary fields (if present). Speaker aliases affect the computed <code>transcript_text</code>.
+                  </p>
+                </section>
+              </div>
             </section>
           </section>
         </section>
@@ -509,3 +661,4 @@
     <script src="./app.js"></script>
   </body>
 </html>
+

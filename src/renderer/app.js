@@ -26,8 +26,8 @@ const state = {
   selectedSessionId: null,
   activeView: "capture",
   captureSubView: "setup",
-  detailSubView: "timeline",
-  settingsSubView: "health",
+  detailSubView: "transcript",
+  settingsSubView: "defaults",
   transcriptionSubView: "providers",
   sourcePickerOpen: false,
   sourceFilter: "all",
@@ -82,6 +82,7 @@ const els = {
   sessionTitle: document.getElementById("session-title"),
   chunkSeconds: document.getElementById("chunk-seconds"),
   toast: document.getElementById("toast"),
+  sidebarSettingsBtn: document.getElementById("sidebar-settings-btn"),
   navCaptureBtn: document.getElementById("nav-capture-btn"),
   navSettingsBtn: document.getElementById("nav-settings-btn"),
   captureView: document.getElementById("capture-view"),
@@ -109,9 +110,11 @@ const els = {
   settingsTabHealth: document.getElementById("settings-tab-health"),
   settingsTabDefaults: document.getElementById("settings-tab-defaults"),
   settingsTabTranscription: document.getElementById("settings-tab-transcription"),
+  settingsTabExport: document.getElementById("settings-tab-export"),
   settingsHealthPanel: document.getElementById("settings-health-panel"),
   settingsDefaultsPanel: document.getElementById("settings-defaults-panel"),
   settingsTranscriptionPanel: document.getElementById("settings-transcription-panel"),
+  settingsExportPanel: document.getElementById("settings-export-panel"),
   transcriptionTabProviders: document.getElementById("transcription-tab-providers"),
   transcriptionTabUsage: document.getElementById("transcription-tab-usage"),
   transcriptionProvidersPane: document.getElementById("transcription-providers-pane"),
@@ -134,6 +137,19 @@ const els = {
   resumeBtn: document.getElementById("resume-btn"),
   stopBtn: document.getElementById("stop-btn"),
   copyAllBtn: document.getElementById("copy-all-btn"),
+  exportTranscriptBtn: document.getElementById("export-transcript-btn"),
+  exportFormatMd: document.getElementById("export-format-md"),
+  exportFormatTxt: document.getElementById("export-format-txt"),
+  exportFormatPdf: document.getElementById("export-format-pdf"),
+  exportFormatJson: document.getElementById("export-format-json"),
+  exportIncludeMeta: document.getElementById("export-include-meta"),
+  exportIncludeSummary: document.getElementById("export-include-summary"),
+  exportApplyAliases: document.getElementById("export-apply-aliases"),
+  exportOutputDir: document.getElementById("export-output-dir"),
+  exportFilenamePreview: document.getElementById("export-filename-preview"),
+  pickExportOutputDirBtn: document.getElementById("pick-export-output-dir-btn"),
+  clearExportOutputDirBtn: document.getElementById("clear-export-output-dir-btn"),
+  saveExportSettingsBtn: document.getElementById("save-export-settings-btn"),
   openTranscriptBtn: document.getElementById("open-transcript-btn"),
   generateSummaryBtn: document.getElementById("generate-summary-btn"),
   renameSessionBtn: document.getElementById("rename-session-btn"),
@@ -260,14 +276,40 @@ function friendlyError(errorLike) {
   return message;
 }
 
-function showToast(message, isError = false) {
-  els.toast.textContent = message;
+function showToast(message, isError = false, durationMs = 2500, action = null) {
+  if (!els.toast) {
+    return;
+  }
+  els.toast.replaceChildren();
+  const msg = document.createElement("div");
+  msg.className = "toast-message";
+  msg.textContent = String(message || "");
+  els.toast.appendChild(msg);
+  if (action && typeof action === "object" && action.label && typeof action.onClick === "function") {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "toast-action";
+    btn.textContent = String(action.label);
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        const result = action.onClick();
+        if (result && typeof result.then === "function") {
+          result.catch((error) => showToast(friendlyError(error), true, 4000));
+        }
+      } catch (error) {
+        showToast(friendlyError(error), true, 4000);
+      }
+    });
+    els.toast.appendChild(btn);
+  }
   els.toast.classList.remove("hidden");
   els.toast.style.background = isError ? "#991b1b" : "#111827";
   clearTimeout(showToast._timer);
   showToast._timer = setTimeout(() => {
     els.toast.classList.add("hidden");
-  }, 2500);
+  }, Math.max(600, Number(durationMs || 0)));
 }
 
 function formatSeconds(sec) {
@@ -322,8 +364,20 @@ function getSpeakerIdsFromChunks(chunks) {
   return [...ids].sort((a, b) => a - b);
 }
 
+function speakerAliasScopedKey(trackId, speakerId) {
+  const tid = String(trackId || "").trim();
+  const sid = Number.parseInt(String(speakerId), 10);
+  if (!tid || !Number.isInteger(sid) || sid < 0) {
+    return "";
+  }
+  return `${tid}:${sid}`;
+}
+
 function buildSpeakerAliasMap(events) {
-  const map = {};
+  const map = {
+    bySpeakerId: {},
+    byTrackSpeaker: {}
+  };
   for (const event of events || []) {
     if (String(event?.event_type || "") !== "speaker_alias") {
       continue;
@@ -333,16 +387,40 @@ function buildSpeakerAliasMap(events) {
       continue;
     }
     const alias = String(event?.payload?.alias || "").trim();
-    if (!alias) {
-      delete map[speakerId];
+    const scopedKey = speakerAliasScopedKey(event?.payload?.track_id, speakerId);
+    if (scopedKey) {
+      if (!alias) {
+        delete map.byTrackSpeaker[scopedKey];
+      } else {
+        map.byTrackSpeaker[scopedKey] = alias;
+      }
       continue;
     }
-    map[speakerId] = alias;
+    if (!alias) {
+      delete map.bySpeakerId[speakerId];
+      continue;
+    }
+    map.bySpeakerId[speakerId] = alias;
   }
   return map;
 }
 
-function applySpeakerAliasesToText(text, aliasMap) {
+function resolveSpeakerAlias(aliasMap, speakerId, trackId = "") {
+  const id = Number.parseInt(String(speakerId), 10);
+  if (!Number.isInteger(id) || id < 0) {
+    return "";
+  }
+  const scopedKey = speakerAliasScopedKey(trackId, id);
+  if (scopedKey) {
+    const scopedAlias = String(aliasMap?.byTrackSpeaker?.[scopedKey] || "").trim();
+    if (scopedAlias) {
+      return scopedAlias;
+    }
+  }
+  return String(aliasMap?.bySpeakerId?.[id] || aliasMap?.[id] || "").trim();
+}
+
+function applySpeakerAliasesToText(text, aliasMap, trackId = "") {
   const source = String(text || "");
   if (!source) {
     return "";
@@ -352,9 +430,24 @@ function applySpeakerAliasesToText(text, aliasMap) {
     if (!Number.isInteger(id) || id < 0) {
       return full;
     }
-    const alias = String(aliasMap?.[id] || "").trim();
+    const alias = resolveSpeakerAlias(aliasMap, id, trackId);
     return alias ? `${alias}:` : full;
   });
+}
+
+function buildSpeakerCatalogFallback(chunks, aliasMap) {
+  const ids = getSpeakerIdsFromChunks(chunks || []);
+  return ids.map((speakerId) => ({
+    key: `legacy:${speakerId}`,
+    track_id: "",
+    track_order: 0,
+    source_label: "",
+    source_short: "",
+    speaker_id: speakerId,
+    speaker_label: `Speaker ${speakerId}`,
+    display_label: `Speaker ${speakerId}`,
+    alias: resolveSpeakerAlias(aliasMap, speakerId, "")
+  }));
 }
 
 function normalizeClockToken(token) {
@@ -444,13 +537,12 @@ function buildChunkTextMarkup(text, chunkIndex = 0) {
         ? ` data-line-id="c${Number(chunkIndex || 0)}-l${lineNumber}"`
         : "";
       const speakerHtml = speaker
-        ? `<span class="chunk-line-speaker">${safeText(speaker)}:</span>`
-        : '<span class="chunk-line-speaker"></span>';
+        ? `<span class="chunk-line-speaker-inline">${safeText(speaker)}:</span>`
+        : "";
       return `
         <div class="chunk-line"${lineIdAttr}>
           <span class="chunk-line-range">${safeText(row.range || "")}</span>
-          ${speakerHtml}
-          <span class="chunk-line-content">${safeText(content)}</span>
+          <span class="chunk-line-content"><span class="chunk-line-text">${speakerHtml}${safeText(content)}</span></span>
         </div>
       `;
     })
@@ -1250,6 +1342,7 @@ function filterSessions(sessions) {
 }
 
 function setView(nextView) {
+  const prevView = state.activeView;
   state.activeView = nextView === "settings" ? "settings" : "capture";
   const isSettings = state.activeView === "settings";
   els.captureView.classList.toggle("hidden", isSettings);
@@ -1260,6 +1353,21 @@ function setView(nextView) {
   els.navSettingsBtn.setAttribute("aria-selected", isSettings ? "true" : "false");
   els.navCaptureBtn.tabIndex = isSettings ? -1 : 0;
   els.navSettingsBtn.tabIndex = isSettings ? 0 : -1;
+
+  if (prevView === "settings" && !isSettings) {
+    setSettingsSubView(state.settingsSubView);
+  }
+  renderSidebarSettingsButton();
+}
+
+function renderSidebarSettingsButton() {
+  if (!els.sidebarSettingsBtn) {
+    return;
+  }
+  const isSettings = state.activeView === "settings";
+  els.sidebarSettingsBtn.classList.toggle("active", isSettings);
+  els.sidebarSettingsBtn.textContent = isSettings ? "Back to Workspace" : "Settings";
+  els.sidebarSettingsBtn.setAttribute("aria-pressed", isSettings ? "true" : "false");
 }
 
 function setCaptureSubView(nextSubView) {
@@ -1280,6 +1388,7 @@ function setCaptureSubView(nextSubView) {
   els.captureTabSetup.setAttribute("aria-selected", isSetup ? "true" : "false");
   els.captureTabSessions.setAttribute("aria-selected", isSessions ? "true" : "false");
   els.captureTabTranscript.setAttribute("aria-selected", isTranscript ? "true" : "false");
+  renderWorkspaceHeader();
 }
 
 function setDetailSubView(nextSubView) {
@@ -1323,26 +1432,37 @@ function setDetailSubView(nextSubView) {
 }
 
 function setSettingsSubView(nextSubView) {
-  const valid = ["health", "defaults", "transcription"];
-  state.settingsSubView = valid.includes(nextSubView) ? nextSubView : "health";
+  const valid = ["health", "defaults", "transcription", "export"];
+  state.settingsSubView = valid.includes(nextSubView) ? nextSubView : "defaults";
   const isHealth = state.settingsSubView === "health";
   const isDefaults = state.settingsSubView === "defaults";
   const isTranscription = state.settingsSubView === "transcription";
+  const isExport = state.settingsSubView === "export";
 
   els.settingsHealthPanel.classList.toggle("hidden", !isHealth);
   els.settingsDefaultsPanel.classList.toggle("hidden", !isDefaults);
   els.settingsTranscriptionPanel.classList.toggle("hidden", !isTranscription);
+  if (els.settingsExportPanel) {
+    els.settingsExportPanel.classList.toggle("hidden", !isExport);
+  }
 
   els.settingsTabHealth.classList.toggle("active", isHealth);
   els.settingsTabDefaults.classList.toggle("active", isDefaults);
   els.settingsTabTranscription.classList.toggle("active", isTranscription);
+  if (els.settingsTabExport) {
+    els.settingsTabExport.classList.toggle("active", isExport);
+  }
 
   els.settingsTabHealth.setAttribute("aria-selected", isHealth ? "true" : "false");
   els.settingsTabDefaults.setAttribute("aria-selected", isDefaults ? "true" : "false");
   els.settingsTabTranscription.setAttribute("aria-selected", isTranscription ? "true" : "false");
+  if (els.settingsTabExport) {
+    els.settingsTabExport.setAttribute("aria-selected", isExport ? "true" : "false");
+  }
   if (isTranscription) {
     setTranscriptionSubView(state.transcriptionSubView);
   }
+  renderWorkspaceHeader();
 }
 
 function setTranscriptionSubView(nextSubView) {
@@ -1467,22 +1587,44 @@ function renderStatus() {
 function renderWorkspaceHeader() {
   const isSettings = state.activeView === "settings";
   if (isSettings) {
-    els.workspaceTitle.textContent = "Workspace Settings";
-    els.workspaceSubtitle.textContent =
-      "Configure capture health, transcription defaults, and source presets.";
+    if (state.settingsSubView === "health") {
+      els.workspaceTitle.textContent = "Settings | Health";
+      els.workspaceSubtitle.textContent = "Check app setup, audio support, and repair tools.";
+    } else if (state.settingsSubView === "defaults") {
+      els.workspaceTitle.textContent = "Settings | Sources";
+      els.workspaceSubtitle.textContent = "Choose which sources are pre-selected for new sessions.";
+    } else if (state.settingsSubView === "transcription") {
+      els.workspaceTitle.textContent = "Settings | Transcription";
+      els.workspaceSubtitle.textContent = "Configure transcription, summaries, models, and usage.";
+    } else if (state.settingsSubView === "export") {
+      els.workspaceTitle.textContent = "Settings | Export";
+      els.workspaceSubtitle.textContent = "Set default export format, content, and save location.";
+    } else {
+      els.workspaceTitle.textContent = "Settings";
+      els.workspaceSubtitle.textContent = "Configure app defaults and maintenance tools.";
+    }
     els.shortcutHints.classList.add("hidden");
     return;
   }
-  els.workspaceTitle.textContent = "Meeting Capture Workspace";
-  els.workspaceSubtitle.textContent =
-    "Capture meeting and call audio, then review timestamped transcript chunks for notes, docs, or AI workflows.";
+  if (state.captureSubView === "setup") {
+    els.workspaceTitle.textContent = "New Session";
+    els.workspaceSubtitle.textContent = "Set session details and start recording with sources from Settings.";
+  } else if (state.captureSubView === "sessions") {
+    els.workspaceTitle.textContent = "Sessions";
+    els.workspaceSubtitle.textContent = "Browse, open, and manage sessions in the selected folder.";
+  } else {
+    els.workspaceTitle.textContent = "Transcript";
+    els.workspaceSubtitle.textContent = "Live capture controls, transcript review, summary, chat, and timeline.";
+  }
   els.shortcutHints.classList.remove("hidden");
 }
 
 function renderFolderContext() {
   const folder = findFolder(state.selectedFolderId);
   const name = folder ? folder.name : "None";
-  els.sessionFolderContext.textContent = `Folder: ${name}`;
+  if (els.sessionFolderContext) {
+    els.sessionFolderContext.textContent = `Folder: ${name}`;
+  }
   els.selectedFolderHint.textContent = folder
     ? `${folder.name} selected`
     : "No folder selected";
@@ -1622,6 +1764,14 @@ function getCheckedSourcesByName(name) {
   return state.sources.filter((source) => ids.includes(source.id));
 }
 
+function getConfiguredSessionStartSources() {
+  const selectedInCapture = getCheckedSourcesByName("source-check");
+  if (selectedInCapture.length > 0) {
+    return selectedInCapture;
+  }
+  return Array.isArray(state.settings?.default_sources) ? state.settings.default_sources : [];
+}
+
 function sourceGroupsFrom(sourceList) {
   const groups = [
     {
@@ -1658,29 +1808,10 @@ function isExclusiveLoopbackSource(source) {
 }
 
 function applyExclusiveSelection(inputName, changedInput, changedSource) {
-  if (!changedInput.checked) {
-    return;
-  }
-  const all = [...document.querySelectorAll(`input[name="${inputName}"]`)];
-  if (isExclusiveLoopbackSource(changedSource)) {
-    for (const input of all) {
-      if (input !== changedInput) {
-        input.checked = false;
-      }
-    }
-    showToast("Loopback sources currently record one source at a time.");
-    return;
-  }
-
-  for (const input of all) {
-    if (input === changedInput || !input.checked) {
-      continue;
-    }
-    const source = findSource(input.value);
-    if (isExclusiveLoopbackSource(source)) {
-      input.checked = false;
-    }
-  }
+  // Multi-track backend capture supports loopback + other sources together.
+  void inputName;
+  void changedInput;
+  void changedSource;
 }
 
 function syncRowSelectionClasses(inputName) {
@@ -1734,6 +1865,13 @@ function renderSourceRows({
     for (const source of group.rows) {
       const row = document.createElement("div");
       const checked = checkedIds.has(source.id);
+      const metaPills = [
+        source.kind ? `<span class="source-meta-pill">${safeText(source.kind)}</span>` : "",
+        source.format ? `<span class="source-meta-pill source-meta-pill-muted">${safeText(source.format)}</span>` : "",
+        source.process_id ? `<span class="source-meta-pill source-meta-pill-pid">PID ${safeText(source.process_id)}</span>` : "",
+      ]
+        .filter(Boolean)
+        .join("");
       row.className = `source-row${checked ? " selected" : ""}`;
       row.innerHTML = `
         <div class="source-meta">
@@ -1743,10 +1881,10 @@ function renderSourceRows({
               <span class="source-label-text">${safeText(source.label)}</span>
             </span>
           </label>
-          <span class="muted source-meta-line">${safeText(source.kind)} | ${safeText(source.format)}${source.process_id ? ` | PID ${safeText(source.process_id)}` : ""}</span>
+          <div class="source-meta-line">${metaPills}</div>
         </div>
         <div class="source-actions">
-          ${showTestButtons ? `<button data-test-source="${safeText(source.id)}">Test</button>` : ""}
+          ${showTestButtons ? `<button class="source-test-btn" data-test-source="${safeText(source.id)}">Test</button>` : ""}
         </div>
       `;
       const sourceCheckbox = row.querySelector(`input[name="${inputName}"]`);
@@ -1776,7 +1914,7 @@ function renderSelectedSourcesSummary() {
   const checked = getCheckedSourcesByName("source-check");
   els.selectedSourcesSummary.innerHTML = "";
   if (checked.length === 0) {
-    els.selectedSourcesSummary.innerHTML = '<span class="muted">No source selected.</span>';
+    els.selectedSourcesSummary.innerHTML = '<span class="muted">No sources selected.</span>';
     return;
   }
   const fragment = document.createDocumentFragment();
@@ -2186,7 +2324,7 @@ function renderDetailChat(session, chatMessages, lineEntries) {
   const canAsk = Boolean(session) && hasSummaryApiKey && !state.chatSending && (lineEntries || []).length > 0;
   if (els.detailChatSendBtn) {
     els.detailChatSendBtn.disabled = !canAsk;
-    els.detailChatSendBtn.textContent = state.chatSending ? "Thinking..." : "Ask Transcript";
+    els.detailChatSendBtn.textContent = state.chatSending ? "Thinking..." : "Ask";
   }
   if (!session) {
     els.detailChatStatus.textContent = "Select a session to start transcript-grounded chat.";
@@ -2325,6 +2463,8 @@ function renderDetailChat(session, chatMessages, lineEntries) {
 async function saveSpeakerAlias(sessionId, speakerId, aliasInput, triggerButton, options = {}) {
   const alias = String(aliasInput || "").trim();
   const previousAlias = String(options.previousAlias || "").trim();
+  const trackId = String(options.trackId || "").trim();
+  const speakerLabel = String(options.speakerLabel || `Speaker ${speakerId}`).trim();
   if (alias === previousAlias) {
     return { skipped: true };
   }
@@ -2335,9 +2475,9 @@ async function saveSpeakerAlias(sessionId, speakerId, aliasInput, triggerButton,
     button.textContent = "Saving...";
   }
   try {
-    await window.clipscribe.setSessionSpeakerAlias(sessionId, speakerId, alias);
+    await window.clipscribe.setSessionSpeakerAlias(sessionId, speakerId, alias, trackId);
     await renderDetail();
-    showToast(alias ? `Speaker ${speakerId} renamed to "${alias}".` : `Speaker ${speakerId} reset.`);
+    showToast(alias ? `${speakerLabel} renamed to "${alias}".` : `${speakerLabel} reset.`);
     return { skipped: false };
   } catch (error) {
     showToast(friendlyError(error), true);
@@ -2350,11 +2490,15 @@ async function saveSpeakerAlias(sessionId, speakerId, aliasInput, triggerButton,
   }
 }
 
-async function resetAllSpeakerAliases(sessionId, aliasMap, triggerButton) {
-  const resetIds = Object.keys(aliasMap || {})
-    .map((key) => Number.parseInt(key, 10))
-    .filter((id) => Number.isInteger(id) && id >= 0);
-  if (resetIds.length === 0) {
+async function resetAllSpeakerAliases(sessionId, speakerCatalog, triggerButton) {
+  const resetTargets = (speakerCatalog || [])
+    .map((item) => ({
+      speakerId: Number.parseInt(String(item?.speaker_id), 10),
+      trackId: String(item?.track_id || "").trim(),
+      alias: String(item?.alias || "").trim()
+    }))
+    .filter((item) => Number.isInteger(item.speakerId) && item.speakerId >= 0 && item.alias);
+  if (resetTargets.length === 0) {
     showToast("No speaker aliases to reset.");
     return;
   }
@@ -2365,8 +2509,13 @@ async function resetAllSpeakerAliases(sessionId, aliasMap, triggerButton) {
     button.textContent = "Resetting...";
   }
   try {
-    for (const speakerId of resetIds) {
-      await window.clipscribe.setSessionSpeakerAlias(sessionId, speakerId, "");
+    for (const target of resetTargets) {
+      await window.clipscribe.setSessionSpeakerAlias(
+        sessionId,
+        target.speakerId,
+        "",
+        target.trackId
+      );
     }
     await renderDetail();
     showToast("All speaker aliases reset.");
@@ -2380,36 +2529,65 @@ async function resetAllSpeakerAliases(sessionId, aliasMap, triggerButton) {
   }
 }
 
-function renderSpeakerAliasPanel(sessionId, speakerIds, aliasMap) {
+function renderSpeakerAliasPanel(sessionId, speakerCatalog, aliasMap) {
   if (!els.detailSpeakers) {
     return;
   }
-  const ids = [...new Set([...(speakerIds || []), ...Object.keys(aliasMap || {}).map((key) => Number(key))])]
-    .filter((id) => Number.isInteger(id) && id >= 0)
-    .sort((a, b) => a - b);
-  const hasAnyAlias = ids.some((id) => String(aliasMap?.[id] || "").trim());
-  if (ids.length === 0) {
+  const rowsSource = Array.isArray(speakerCatalog) ? speakerCatalog : [];
+  const entries = rowsSource
+    .map((item) => {
+      const speakerId = Number.parseInt(String(item?.speaker_id), 10);
+      if (!Number.isInteger(speakerId) || speakerId < 0) {
+        return null;
+      }
+      const trackId = String(item?.track_id || "").trim();
+      const label = String(item?.display_label || item?.speaker_label || `Speaker ${speakerId}`).trim();
+      const alias = String(
+        item?.alias ||
+        resolveSpeakerAlias(aliasMap, speakerId, trackId) ||
+        ""
+      ).trim();
+      return {
+        key: String(item?.key || speakerAliasScopedKey(trackId, speakerId) || `speaker:${speakerId}`),
+        speakerId,
+        trackId,
+        sourceLabel: String(item?.source_label || "").trim(),
+        label: label || `Speaker ${speakerId}`,
+        alias
+      };
+    })
+    .filter(Boolean);
+  const hasAnyAlias = entries.some((item) => item.alias);
+  if (entries.length === 0) {
     els.detailSpeakers.classList.add("hidden");
     els.detailSpeakers.innerHTML = "";
     return;
   }
 
-  const rows = ids
-    .map((speakerId) => {
-      const alias = String(aliasMap?.[speakerId] || "");
+  const rows = entries
+    .map((entry) => {
+      const alias = String(entry.alias || "");
+      const sourceMeta = entry.sourceLabel && entry.sourceLabel !== entry.label
+        ? `<span class="speaker-alias-source" title="${safeText(entry.sourceLabel)}">${safeText(entry.sourceLabel)}</span>`
+        : "";
       return `
-        <div class="speaker-alias-row">
-          <span class="speaker-alias-label">Speaker ${speakerId}</span>
-          <input
-            class="speaker-alias-input"
-            type="text"
-            data-speaker-alias-input="${speakerId}"
-            value="${safeText(alias)}"
-            placeholder="Name (optional)"
-          />
-          <button class="speaker-alias-save" type="button" data-speaker-alias-save="${speakerId}">
-            ${alias ? "Update" : "Set"}
-          </button>
+        <div class="speaker-alias-row" title="${safeText(entry.sourceLabel || entry.label)}">
+          <div class="speaker-alias-meta">
+            <span class="speaker-alias-label">${safeText(entry.label)}</span>
+            ${sourceMeta}
+          </div>
+          <div class="speaker-alias-controls">
+            <input
+              class="speaker-alias-input"
+              type="text"
+              data-speaker-alias-input="${safeText(entry.key)}"
+              value="${safeText(alias)}"
+              placeholder="Name (optional)"
+            />
+            <button class="speaker-alias-save" type="button" data-speaker-alias-save="${safeText(entry.key)}">
+              ${alias ? "Update" : "Set"}
+            </button>
+          </div>
         </div>
       `;
     })
@@ -2431,23 +2609,25 @@ function renderSpeakerAliasPanel(sessionId, speakerIds, aliasMap) {
   const resetButton = els.detailSpeakers.querySelector("#reset-speaker-aliases-btn");
   if (resetButton) {
     resetButton.addEventListener("click", () => {
-      void resetAllSpeakerAliases(sessionId, aliasMap, resetButton);
+      void resetAllSpeakerAliases(sessionId, entries, resetButton);
     });
   }
 
   const saveButtons = els.detailSpeakers.querySelectorAll("[data-speaker-alias-save]");
   for (const button of saveButtons) {
-    const speakerId = Number.parseInt(button.dataset.speakerAliasSave, 10);
-    const input = els.detailSpeakers.querySelector(
-      `input[data-speaker-alias-input="${speakerId}"]`
-    );
-    if (!input || !Number.isInteger(speakerId)) {
+    const entryKey = String(button.dataset.speakerAliasSave || "").trim();
+    const entry = entries.find((item) => item.key === entryKey) || null;
+    const rowEl = button.closest(".speaker-alias-row");
+    const input = rowEl?.querySelector("input[data-speaker-alias-input]");
+    if (!input || !entry) {
       continue;
     }
-    input.dataset.lastSavedAlias = String(aliasMap?.[speakerId] || "").trim();
+    input.dataset.lastSavedAlias = String(entry.alias || "").trim();
     button.addEventListener("click", () => {
-      void saveSpeakerAlias(sessionId, speakerId, input.value, button, {
-        previousAlias: input.dataset.lastSavedAlias
+      void saveSpeakerAlias(sessionId, entry.speakerId, input.value, button, {
+        previousAlias: input.dataset.lastSavedAlias,
+        trackId: entry.trackId,
+        speakerLabel: entry.label
       });
       input.dataset.lastSavedAlias = String(input.value || "").trim();
       if (String(input.dataset.lastSavedAlias || "").trim()) {
@@ -2481,6 +2661,7 @@ function normalizeTimelineEvents(events) {
         Number.isInteger(speakerId) &&
         speakerId >= 0 &&
         speakerId === prevSpeakerId &&
+        String(prev?.payload?.track_id || "").trim() === String(event?.payload?.track_id || "").trim() &&
         Math.abs(atSec - prevAtSec) < 1
       ) {
         normalized[normalized.length - 1] = event;
@@ -2504,13 +2685,17 @@ function describeTimelineEvent(event) {
   if (type === "speaker_alias") {
     const speakerId = Number.parseInt(String(event?.payload?.speaker_id), 10);
     const alias = String(event?.payload?.alias || "").trim();
+    const sourceLabel = String(event?.payload?.source_label || "").trim();
+    const baseLabel = Number.isInteger(speakerId) && speakerId >= 0
+      ? (sourceLabel ? `${sourceLabel} | Speaker ${speakerId}` : `Speaker ${speakerId}`)
+      : "Speaker";
     if (Number.isInteger(speakerId) && speakerId >= 0) {
       return {
         tag: "speaker",
         tagClass: "speaker",
         message: alias
-          ? `Speaker ${speakerId} renamed to "${alias}".`
-          : `Speaker ${speakerId} name reset.`
+          ? `${baseLabel} renamed to "${alias}".`
+          : `${baseLabel} name reset.`
       };
     }
     return {
@@ -2616,8 +2801,10 @@ async function renderDetail() {
   const chatLineEntries = buildSessionChatLineEntries(detail.chunks || [], speakerAliasMap);
   state.chatLineEntries = chatLineEntries;
   renderDetailChat(session, detail.chat_messages || [], chatLineEntries);
-  const speakerIds = getSpeakerIdsFromChunks(detail.chunks || []);
-  renderSpeakerAliasPanel(session.id, speakerIds, speakerAliasMap);
+  const speakerCatalog = Array.isArray(detail.speaker_catalog) && detail.speaker_catalog.length > 0
+    ? detail.speaker_catalog
+    : buildSpeakerCatalogFallback(detail.chunks || [], speakerAliasMap);
+  renderSpeakerAliasPanel(session.id, speakerCatalog, speakerAliasMap);
   els.detailMeta.textContent = `${session.status} | ${formatSeconds(getDisplayRecordedSeconds(session))}`;
   renderDetailEstimate(detail.chunks || []);
 
@@ -2708,7 +2895,7 @@ function renderSetupFlow() {
   const folder = findFolder(state.selectedFolderId);
   const hasFolder = Boolean(folder);
   const hasTitle = Boolean(String(els.sessionTitle?.value || "").trim());
-  const selectedSources = getCheckedSourcesByName("source-check");
+  const selectedSources = getConfiguredSessionStartSources();
   const hasSources = selectedSources.length > 0;
 
   setFlowStepState(els.flowStepSession, hasFolder ? "complete" : "active");
@@ -2719,22 +2906,22 @@ function renderSetupFlow() {
     return;
   }
   if (!hasFolder) {
-    els.setupActionHint.textContent = "Select a folder on the left to store this session.";
+    els.setupActionHint.textContent = "Select a folder to continue.";
     return;
   }
   if (!hasSources) {
-    els.setupActionHint.textContent = "Pick at least one source to enable Start.";
+    els.setupActionHint.textContent = "Set at least one default source in Settings > Sources.";
     return;
   }
   if (active) {
-    els.setupActionHint.textContent = "Recording is active. Apply Source Changes updates sources without stopping.";
+    els.setupActionHint.textContent = "Recording is active. Open Transcript to control recording.";
     return;
   }
   if (!hasTitle) {
-    els.setupActionHint.textContent = "Ready to start. Add a session title (optional) to keep your list organized.";
+    els.setupActionHint.textContent = "Ready to record. Session title is optional.";
     return;
   }
-  els.setupActionHint.textContent = "Ready. Click Start & Open Transcript to begin capture.";
+  els.setupActionHint.textContent = "Ready. Click Start Recording.";
 }
 
 function renderControls() {
@@ -2750,9 +2937,11 @@ function renderControls() {
     (selectedSummaryProgress && selectedSummaryProgress.status === "running")
   );
   const folder = findFolder(state.selectedFolderId);
-  const setupSelectedSources = getCheckedSourcesByName("source-check");
+  const setupSelectedSources = getConfiguredSessionStartSources();
   const canTestOneSource = setupSelectedSources.length === 1;
-  els.recordBtn.disabled = Boolean(active);
+  if (els.recordBtn) {
+    els.recordBtn.disabled = Boolean(active);
+  }
   els.pauseBtn.disabled = !active || active.status !== "recording";
   els.resumeBtn.disabled = !active || active.status !== "paused";
   els.stopBtn.disabled = !active;
@@ -2761,6 +2950,9 @@ function renderControls() {
   els.playLastTestBtn.disabled = !state.lastTestClip?.path;
   els.applySourcesBtn.disabled = !active;
   els.copyAllBtn.disabled = !selected;
+  if (els.exportTranscriptBtn) {
+    els.exportTranscriptBtn.disabled = !selected;
+  }
   els.openTranscriptBtn.disabled = !selected;
   if (els.generateSummaryBtn) {
     els.generateSummaryBtn.disabled = !selectedStopped || summaryBusy;
@@ -3009,6 +3201,32 @@ function renderSettings() {
   if (!els.usageGrouping.value) {
     els.usageGrouping.value = "";
   }
+
+  if (els.exportFormatMd && els.exportFormatTxt && els.exportFormatPdf && els.exportFormatJson) {
+    const rawFormat = String(settings.export_format || "pdf").trim().toLowerCase();
+    const format = ["md", "txt", "pdf", "json"].includes(rawFormat) ? rawFormat : "pdf";
+    els.exportFormatMd.checked = format === "md";
+    els.exportFormatTxt.checked = format === "txt";
+    els.exportFormatPdf.checked = format === "pdf";
+    els.exportFormatJson.checked = format === "json";
+  }
+  if (els.exportIncludeMeta) {
+    els.exportIncludeMeta.checked = settings.export_include_meta !== false;
+  }
+  if (els.exportIncludeSummary) {
+    els.exportIncludeSummary.checked = settings.export_include_summary !== false;
+  }
+  if (els.exportApplyAliases) {
+    els.exportApplyAliases.checked = settings.export_apply_speaker_aliases !== false;
+  }
+  if (els.exportOutputDir) {
+    els.exportOutputDir.value = String(settings.export_output_dir || "").trim();
+  }
+  if (els.clearExportOutputDirBtn) {
+    els.clearExportOutputDirBtn.disabled = !String(settings.export_output_dir || "").trim();
+  }
+  syncExportSettingsControls();
+  renderExportFilenamePreview();
 }
 
 function renderUsageBreakdown() {
@@ -3326,6 +3544,214 @@ async function copyAllTranscript() {
   showToast("Transcript copied.");
 }
 
+function getSelectedExportFormatFromControls() {
+  if (!els.exportFormatMd || !els.exportFormatTxt || !els.exportFormatPdf || !els.exportFormatJson) {
+    return "pdf";
+  }
+  if (els.exportFormatJson?.checked) {
+    return "json";
+  }
+  if (els.exportFormatPdf?.checked) {
+    return "pdf";
+  }
+  if (els.exportFormatTxt?.checked) {
+    return "txt";
+  }
+  return "md";
+}
+
+function syncExportSettingsControls() {
+  const format = getSelectedExportFormatFromControls();
+  const jsonMode = format === "json";
+
+  if (els.exportIncludeMeta) {
+    els.exportIncludeMeta.disabled = jsonMode;
+    if (jsonMode) {
+      els.exportIncludeMeta.checked = true;
+    }
+  }
+  if (els.exportIncludeSummary) {
+    els.exportIncludeSummary.disabled = jsonMode;
+    if (jsonMode) {
+      els.exportIncludeSummary.checked = true;
+    }
+  }
+}
+
+function getExportExtForFormat(format) {
+  const normalized = String(format || "").trim().toLowerCase();
+  if (normalized === "txt") {
+    return "txt";
+  }
+  if (normalized === "json") {
+    return "json";
+  }
+  if (normalized === "md") {
+    return "md";
+  }
+  return "pdf";
+}
+
+function getSessionDateForExportPreview(session) {
+  const startedAt = String(session?.started_at || "").trim();
+  if (startedAt && startedAt.length >= 10) {
+    const candidate = startedAt.slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(candidate)) {
+      return candidate;
+    }
+  }
+  return "YYYY-MM-DD";
+}
+
+function getSessionTitleForExportPreview(session) {
+  const raw = String(session?.title || "").trim();
+  return raw || "Session Title";
+}
+
+function renderExportFilenamePreview() {
+  if (!els.exportFilenamePreview) {
+    return;
+  }
+  const session = state.selectedSessionId ? findSession(state.selectedSessionId) : null;
+  const title = getSessionTitleForExportPreview(session);
+  const date = getSessionDateForExportPreview(session);
+  const configuredFormat = (els.exportFormatMd && els.exportFormatTxt && els.exportFormatPdf && els.exportFormatJson)
+    ? getSelectedExportFormatFromControls()
+    : (state.settings?.export_format || "pdf");
+  const ext = getExportExtForFormat(configuredFormat);
+  els.exportFilenamePreview.textContent = `${title} - ${date} - transcript.${ext}`;
+}
+
+async function saveExportSettings() {
+  try {
+    const format = getSelectedExportFormatFromControls();
+    state.settings = await window.clipscribe.updateSettings({
+      export_format: format,
+      export_include_meta: Boolean(els.exportIncludeMeta?.checked),
+      export_include_summary: Boolean(els.exportIncludeSummary?.checked),
+      export_apply_speaker_aliases: Boolean(els.exportApplyAliases?.checked)
+    });
+    renderSettings();
+    syncExportSettingsControls();
+    renderExportFilenamePreview();
+    showToast("Export settings saved.");
+  } catch (error) {
+    showToast(friendlyError(error), true);
+  }
+}
+
+async function pickExportOutputDir() {
+  if (!window.clipscribe.pickExportOutputDir) {
+    showToast("Folder picker is unavailable in this build.", true);
+    return;
+  }
+  try {
+    const result = await window.clipscribe.pickExportOutputDir();
+    if (result?.canceled) {
+      return;
+    }
+    if (!result?.ok) {
+      showToast("Could not set export folder.", true);
+      return;
+    }
+    state.settings = result.settings || state.settings;
+    renderSettings();
+    renderExportFilenamePreview();
+    showToast("Export folder saved.");
+  } catch (error) {
+    showToast(friendlyError(error), true);
+  }
+}
+
+async function clearExportOutputDir() {
+  try {
+    state.settings = await window.clipscribe.updateSettings({ export_output_dir: "" });
+    renderSettings();
+    renderExportFilenamePreview();
+    showToast("Export folder cleared.");
+  } catch (error) {
+    showToast(friendlyError(error), true);
+  }
+}
+
+async function exportSelectedTranscript() {
+  if (!state.selectedSessionId) {
+    showToast("Select a session first.", true);
+    return;
+  }
+  if (!window.clipscribe.exportSessionTranscript) {
+    showToast("Export is unavailable in this build.", true);
+    return;
+  }
+
+  const settings = state.settings || {};
+  const options = {
+    format: String(settings.export_format || "pdf").trim() || "pdf",
+    include_meta: settings.export_include_meta !== false,
+    include_summary: settings.export_include_summary !== false,
+    apply_speaker_aliases: settings.export_apply_speaker_aliases !== false,
+    output_dir: String(settings.export_output_dir || "").trim()
+  };
+
+  const exportBtn = els.exportTranscriptBtn;
+  const priorExportText = exportBtn ? exportBtn.textContent : "";
+  const priorDetailMetaText = els.detailMeta ? els.detailMeta.textContent : "";
+  if (exportBtn) {
+    exportBtn.disabled = true;
+    exportBtn.textContent = "Exporting...";
+  }
+  if (els.detailMeta) {
+    els.detailMeta.textContent = "exporting...";
+  }
+  showToast(options.output_dir ? "Exporting to your default export folder..." : "Preparing export...", false, 1800);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  try {
+    const result = await window.clipscribe.exportSessionTranscript(state.selectedSessionId, options);
+    if (result?.canceled) {
+      showToast("Export canceled.");
+      return;
+    }
+    if (!result?.ok) {
+      showToast("Export failed.", true);
+      return;
+    }
+    const outPath = String(result.path || "").trim();
+    const fileName = outPath ? outPath.split(/[\\/]/).filter(Boolean).pop() : "";
+    const dirName = outPath ? outPath.split(/[\\/]/).slice(0, -1).join("\\") : "";
+    const feedback = fileName && dirName
+      ? `Exported: ${fileName}\nSaved to: ${dirName}`
+      : fileName
+        ? `Exported: ${fileName}`
+        : "Transcript exported.";
+    const canReveal = Boolean(outPath) && typeof window.clipscribe?.revealInFolder === "function";
+    showToast(
+      feedback,
+      false,
+      canReveal ? 9000 : 6000,
+      canReveal
+        ? {
+          label: "Open Folder",
+          onClick: async () => {
+            await window.clipscribe.revealInFolder(outPath);
+            showToast(`Opened folder for: ${fileName || "export"}`, false, 2200);
+          }
+        }
+        : null
+    );
+  } catch (error) {
+    showToast(friendlyError(error), true);
+  } finally {
+    if (exportBtn) {
+      exportBtn.disabled = false;
+      exportBtn.textContent = priorExportText || "Export";
+    }
+    if (els.detailMeta && els.detailMeta.textContent === "exporting...") {
+      els.detailMeta.textContent = priorDetailMetaText || "";
+    }
+  }
+}
+
 async function generateSummaryForSelectedSession() {
   const session = state.selectedSessionId ? findSession(state.selectedSessionId) : null;
   if (!session) {
@@ -3475,9 +3901,9 @@ async function deleteSelectedSession() {
 }
 
 async function startSession() {
-  const selectedSources = getCheckedSources();
+  const selectedSources = getConfiguredSessionStartSources();
   if (selectedSources.length === 0) {
-    showToast("Select at least one source.", true);
+    showToast("Set at least one default source in Settings > Sources.", true);
     return;
   }
   try {
@@ -3932,6 +4358,12 @@ function wireEvents() {
     setView("settings");
     renderWorkspaceHeader();
   });
+  if (els.sidebarSettingsBtn) {
+    els.sidebarSettingsBtn.addEventListener("click", () => {
+      setView(state.activeView === "settings" ? "capture" : "settings");
+      renderWorkspaceHeader();
+    });
+  }
   const handleTabKeydown = (event) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
       return;
@@ -3968,6 +4400,9 @@ function wireEvents() {
   els.settingsTabHealth.addEventListener("click", () => setSettingsSubView("health"));
   els.settingsTabDefaults.addEventListener("click", () => setSettingsSubView("defaults"));
   els.settingsTabTranscription.addEventListener("click", () => setSettingsSubView("transcription"));
+  if (els.settingsTabExport) {
+    els.settingsTabExport.addEventListener("click", () => setSettingsSubView("export"));
+  }
   if (els.transcriptionTabProviders) {
     els.transcriptionTabProviders.addEventListener("click", () => setTranscriptionSubView("providers"));
   }
@@ -3991,13 +4426,20 @@ function wireEvents() {
     state.defaultSourceSearch = els.defaultSourceSearch.value || "";
     renderDefaultSourceList();
   });
-  els.recordBtn.addEventListener("click", startSession);
+  if (els.recordBtn) {
+    els.recordBtn.addEventListener("click", startSession);
+  }
   els.startFromSetupBtn.addEventListener("click", startSession);
   els.pauseBtn.addEventListener("click", pauseActive);
   els.resumeBtn.addEventListener("click", resumeActive);
   els.stopBtn.addEventListener("click", stopActive);
   els.applySourcesBtn.addEventListener("click", applySourceChange);
   els.copyAllBtn.addEventListener("click", copyAllTranscript);
+  if (els.exportTranscriptBtn) {
+    els.exportTranscriptBtn.addEventListener("click", () => {
+      void exportSelectedTranscript();
+    });
+  }
   els.openTranscriptBtn.addEventListener("click", openSelectedTranscript);
   if (els.generateSummaryBtn) {
     els.generateSummaryBtn.addEventListener("click", generateSummaryForSelectedSession);
@@ -4026,6 +4468,49 @@ function wireEvents() {
   els.deleteFolderBtn.addEventListener("click", deleteSelectedFolder);
   els.refreshSourcesBtn.addEventListener("click", refreshSources);
   els.saveSettingsBtn.addEventListener("click", saveSettings);
+  if (els.saveExportSettingsBtn) {
+    els.saveExportSettingsBtn.addEventListener("click", saveExportSettings);
+  }
+  if (els.pickExportOutputDirBtn) {
+    els.pickExportOutputDirBtn.addEventListener("click", () => {
+      void pickExportOutputDir();
+    });
+  }
+  if (els.clearExportOutputDirBtn) {
+    els.clearExportOutputDirBtn.addEventListener("click", () => {
+      void clearExportOutputDir();
+    });
+  }
+  if (els.exportFormatMd) {
+    els.exportFormatMd.addEventListener("change", () => {
+      syncExportSettingsControls();
+      renderExportFilenamePreview();
+    });
+  }
+  if (els.exportFormatTxt) {
+    els.exportFormatTxt.addEventListener("change", () => {
+      syncExportSettingsControls();
+      renderExportFilenamePreview();
+    });
+  }
+  if (els.exportFormatPdf) {
+    els.exportFormatPdf.addEventListener("change", () => {
+      syncExportSettingsControls();
+      renderExportFilenamePreview();
+    });
+  }
+  if (els.exportFormatJson) {
+    els.exportFormatJson.addEventListener("change", () => {
+      syncExportSettingsControls();
+      renderExportFilenamePreview();
+    });
+  }
+  if (els.exportIncludeMeta) {
+    els.exportIncludeMeta.addEventListener("change", syncExportSettingsControls);
+  }
+  if (els.exportIncludeSummary) {
+    els.exportIncludeSummary.addEventListener("change", syncExportSettingsControls);
+  }
   if (els.refreshDeepgramModelsBtn) {
     els.refreshDeepgramModelsBtn.addEventListener("click", () => {
       void refreshDeepgramModels();
@@ -4152,6 +4637,12 @@ function wireEvents() {
       } else {
         void startSession();
       }
+      return;
+    }
+
+    if (event.ctrlKey && event.shiftKey && (event.key === "E" || event.key === "e")) {
+      event.preventDefault();
+      void exportSelectedTranscript();
       return;
     }
 

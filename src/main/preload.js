@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld("clipscribe", {
   getSettings: () => invoke("settings:get"),
   updateSettings: (partial) => invoke("settings:update", partial),
   autoDetectFfmpeg: () => invoke("settings:auto-detect-ffmpeg"),
+  pickExportOutputDir: () => invoke("settings:pick-export-output-dir"),
   getDeepgramUsageBreakdown: (payload) => invoke("deepgram:usage-breakdown", payload),
   listDeepgramModels: () => invoke("deepgram:list-models"),
   listOpenRouterFreeModels: () => invoke("openrouter:list-free-models"),
@@ -30,15 +31,18 @@ contextBridge.exposeInMainWorld("clipscribe", {
   renameSession: (sessionId, title) => invoke("sessions:rename", { sessionId, title }),
   generateSessionSummary: (sessionId) => invoke("sessions:generate-summary", sessionId),
   askSessionChat: (sessionId, question) => invoke("sessions:chat", { sessionId, question }),
-  setSessionSpeakerAlias: (sessionId, speakerId, alias) =>
-    invoke("sessions:set-speaker-alias", { sessionId, speakerId, alias }),
+  setSessionSpeakerAlias: (sessionId, speakerId, alias, trackId = "") =>
+    invoke("sessions:set-speaker-alias", { sessionId, speakerId, alias, trackId }),
   deleteSession: (sessionId) => invoke("sessions:delete", sessionId),
   changeSessionSources: (sessionId, selectedSources) =>
     invoke("sessions:change-sources", { sessionId, selectedSources }),
+  exportSessionTranscript: (sessionId, options) =>
+    invoke("sessions:export-transcript", { sessionId, options }),
 
   listSources: () => invoke("audio:list-sources"),
   testSource: (source, sessionId) => invoke("audio:test-source", { source, sessionId }),
   readFileBase64: (filePath) => invoke("files:read-binary", filePath),
+  revealInFolder: (filePath) => invoke("files:reveal-in-folder", filePath),
 
   onGlobalUpdated: (cb) => {
     const handler = (_evt, payload) => cb(payload);

@@ -4,6 +4,10 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function legacyTrackIdForSession(sessionId) {
+  return `legacy:${String(sessionId || "").trim()}`;
+}
+
 function toSessionRow(session) {
   if (!session) {
     return null;
@@ -29,6 +33,16 @@ function toChunkRow(chunk) {
   return {
     ...chunk,
     meta: safeParseJson(chunk.meta_json, null)
+  };
+}
+
+function toTrackRow(track) {
+  if (!track) {
+    return null;
+  }
+  return {
+    ...track,
+    source: safeParseJson(track.source_json, null)
   };
 }
 
@@ -93,22 +107,73 @@ function createRepository(db) {
     SELECT * FROM sessions WHERE status IN ('recording', 'paused')
   `);
 
+  const createSessionTrackStmt = db.prepare(`
+    INSERT INTO session_tracks (
+      id, session_id, track_key, track_order,
+      source_label, source_format, source_kind, source_input, source_device_id, source_process_id,
+      source_json, status, error_message, started_at_sec, ended_at_sec, created_at, updated_at
+    ) VALUES (
+      @id, @session_id, @track_key, @track_order,
+      @source_label, @source_format, @source_kind, @source_input, @source_device_id, @source_process_id,
+      @source_json, @status, @error_message, @started_at_sec, @ended_at_sec, @created_at, @updated_at
+    )
+  `);
+  const getSessionTrackStmt = db.prepare(`
+    SELECT * FROM session_tracks WHERE id = ?
+  `);
+  const getSessionTrackByKeyStmt = db.prepare(`
+    SELECT * FROM session_tracks WHERE session_id = ? AND track_key = ?
+  `);
+  const listSessionTracksStmt = db.prepare(`
+    SELECT * FROM session_tracks
+    WHERE session_id = ?
+    ORDER BY track_order ASC, datetime(created_at) ASC
+  `);
+  const updateSessionTrackStmt = db.prepare(`
+    UPDATE session_tracks
+    SET status = @status,
+        error_message = @error_message,
+        ended_at_sec = @ended_at_sec,
+        updated_at = @updated_at
+    WHERE id = @id
+  `);
+
   const createChunkStmt = db.prepare(`
     INSERT INTO transcript_chunks (
-      id, session_id, chunk_index, start_sec, end_sec, text, meta_json, provider, status,
+      id, session_id, track_id, chunk_index, start_sec, end_sec, text, meta_json, provider, status,
       retry_count, error_message, file_path, created_at, updated_at
     ) VALUES (
-      @id, @session_id, @chunk_index, @start_sec, @end_sec, @text, @meta_json, @provider, @status,
+      @id, @session_id, @track_id, @chunk_index, @start_sec, @end_sec, @text, @meta_json, @provider, @status,
       @retry_count, @error_message, @file_path, @created_at, @updated_at
     )
   `);
-  const getChunkBySessionIndexStmt = db.prepare(`
-    SELECT * FROM transcript_chunks WHERE session_id = ? AND chunk_index = ?
+  const getChunkBySessionTrackIndexStmt = db.prepare(`
+    SELECT * FROM transcript_chunks WHERE session_id = ? AND track_id = ? AND chunk_index = ?
   `);
   const listChunksForSessionStmt = db.prepare(`
-    SELECT * FROM transcript_chunks
-    WHERE session_id = ?
-    ORDER BY chunk_index ASC
+    SELECT
+      c.*,
+      st.track_order AS track_order,
+      st.source_label AS source_label
+    FROM transcript_chunks c
+    LEFT JOIN session_tracks st ON st.id = c.track_id
+    WHERE c.session_id = ?
+    ORDER BY
+      c.start_sec ASC,
+      c.end_sec ASC,
+      COALESCE(st.track_order, 0) ASC,
+      c.chunk_index ASC,
+      datetime(c.created_at) ASC
+  `);
+  const listChunksForSessionTrackStmt = db.prepare(`
+    SELECT
+      c.*,
+      st.track_order AS track_order,
+      st.source_label AS source_label
+    FROM transcript_chunks c
+    LEFT JOIN session_tracks st ON st.id = c.track_id
+    WHERE c.session_id = ? AND c.track_id = ?
+    ORDER BY c.chunk_index ASC
   `);
   const updateChunkTimingStmt = db.prepare(`
     UPDATE transcript_chunks
@@ -135,9 +200,14 @@ function createRepository(db) {
     WHERE id = @id
   `);
   const listQueuedChunksStmt = db.prepare(`
-    SELECT * FROM transcript_chunks
-    WHERE status = 'queued'
-    ORDER BY datetime(created_at) ASC
+    SELECT
+      c.*,
+      st.track_order AS track_order,
+      st.source_label AS source_label
+    FROM transcript_chunks c
+    LEFT JOIN session_tracks st ON st.id = c.track_id
+    WHERE c.status = 'queued'
+    ORDER BY datetime(c.created_at) ASC, COALESCE(st.track_order, 0) ASC, c.chunk_index ASC
   `);
 
   const createEventStmt = db.prepare(`
@@ -177,6 +247,40 @@ function createRepository(db) {
     };
     createFolderStmt.run(folder);
     return folder;
+  }
+
+  function ensureLegacyTrackForSession(sessionId) {
+    const session = getSessionStmt.get(sessionId);
+    if (!session) {
+      throw new Error("Session not found.");
+    }
+    const trackId = legacyTrackIdForSession(sessionId);
+    const existing = getSessionTrackStmt.get(trackId);
+    if (existing) {
+      return toTrackRow(existing);
+    }
+    const createdAt = nowIso();
+    const row = {
+      id: trackId,
+      session_id: session.id,
+      track_key: "legacy-mix",
+      track_order: 0,
+      source_label: "Mixed Input",
+      source_format: "mixed",
+      source_kind: "mixed",
+      source_input: null,
+      source_device_id: null,
+      source_process_id: null,
+      source_json: session.selected_sources_json || "[]",
+      status: session.status || "stopped",
+      error_message: null,
+      started_at_sec: 0,
+      ended_at_sec: null,
+      created_at: createdAt,
+      updated_at: createdAt
+    };
+    createSessionTrackStmt.run(row);
+    return toTrackRow(getSessionTrackStmt.get(trackId));
   }
 
   return {
@@ -313,14 +417,84 @@ function createRepository(db) {
       return listActiveSessionsStmt.all().map(toSessionRow);
     },
 
+    createSessionTrack({ id, sessionId, trackKey, trackOrder, source, status = "recording" }) {
+      const session = getSessionStmt.get(sessionId);
+      if (!session) {
+        throw new Error("Session not found.");
+      }
+      const sourceObj = source && typeof source === "object" ? source : {};
+      const normalizedTrackKey = String(trackKey || sourceObj.id || "").trim();
+      if (!normalizedTrackKey) {
+        throw new Error("trackKey is required.");
+      }
+      const createdAt = nowIso();
+      const row = {
+        id: String(id || crypto.randomUUID()).trim(),
+        session_id: String(sessionId).trim(),
+        track_key: normalizedTrackKey,
+        track_order: Number.isInteger(trackOrder) ? trackOrder : 0,
+        source_label: String(sourceObj.label || sourceObj.id || "Input").trim() || "Input",
+        source_format: String(sourceObj.format || "").trim() || "unknown",
+        source_kind: String(sourceObj.kind || "").trim() || null,
+        source_input: sourceObj.input == null ? null : String(sourceObj.input),
+        source_device_id: sourceObj.device_id == null ? null : String(sourceObj.device_id),
+        source_process_id: sourceObj.process_id == null ? null : String(sourceObj.process_id),
+        source_json: JSON.stringify(sourceObj || {}),
+        status: String(status || "recording").trim() || "recording",
+        error_message: null,
+        started_at_sec: 0,
+        ended_at_sec: null,
+        created_at: createdAt,
+        updated_at: createdAt
+      };
+      createSessionTrackStmt.run(row);
+      return toTrackRow(getSessionTrackStmt.get(row.id));
+    },
+
+    getSessionTrack(trackId) {
+      return toTrackRow(getSessionTrackStmt.get(trackId));
+    },
+
+    listSessionTracks(sessionId) {
+      return listSessionTracksStmt.all(sessionId).map(toTrackRow);
+    },
+
+    updateSessionTrack({ id, status, errorMessage, endedAtSec }) {
+      const existing = getSessionTrackStmt.get(id);
+      if (!existing) {
+        throw new Error("Session track not found.");
+      }
+      updateSessionTrackStmt.run({
+        id,
+        status: status === undefined ? existing.status : String(status || existing.status),
+        error_message:
+          errorMessage === undefined
+            ? existing.error_message
+            : (String(errorMessage || "").trim() || null),
+        ended_at_sec:
+          endedAtSec === undefined
+            ? existing.ended_at_sec
+            : (Number.isFinite(Number(endedAtSec)) ? Number(endedAtSec) : null),
+        updated_at: nowIso()
+      });
+      return toTrackRow(getSessionTrackStmt.get(id));
+    },
+
     upsertChunk({
       sessionId,
+      trackId,
       chunkIndex,
       startSec,
       endSec,
       filePath
     }) {
-      const existing = getChunkBySessionIndexStmt.get(sessionId, chunkIndex);
+      const effectiveTrackId = String(trackId || "").trim() || legacyTrackIdForSession(sessionId);
+      if (effectiveTrackId === legacyTrackIdForSession(sessionId)) {
+        ensureLegacyTrackForSession(sessionId);
+      } else if (!getSessionTrackStmt.get(effectiveTrackId)) {
+        throw new Error(`Session track not found: ${effectiveTrackId}`);
+      }
+      const existing = getChunkBySessionTrackIndexStmt.get(sessionId, effectiveTrackId, chunkIndex);
       if (existing) {
         return toChunkRow(existing);
       }
@@ -328,6 +502,7 @@ function createRepository(db) {
       const row = {
         id: crypto.randomUUID(),
         session_id: sessionId,
+        track_id: effectiveTrackId,
         chunk_index: chunkIndex,
         start_sec: startSec,
         end_sec: endSec,
@@ -342,7 +517,7 @@ function createRepository(db) {
         updated_at: createdAt
       };
       createChunkStmt.run(row);
-      return toChunkRow(getChunkBySessionIndexStmt.get(sessionId, chunkIndex));
+      return toChunkRow(getChunkBySessionTrackIndexStmt.get(sessionId, effectiveTrackId, chunkIndex));
     },
 
     markChunkProcessing(chunkId) {
@@ -379,7 +554,11 @@ function createRepository(db) {
       });
     },
 
-    listSessionChunks(sessionId) {
+    listSessionChunks(sessionId, options = {}) {
+      const requestedTrackId = String(options?.trackId || "").trim();
+      if (requestedTrackId) {
+        return listChunksForSessionTrackStmt.all(sessionId, requestedTrackId).map(toChunkRow);
+      }
       return listChunksForSessionStmt.all(sessionId).map(toChunkRow);
     },
 
